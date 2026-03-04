@@ -1,0 +1,54 @@
+/* Custom styles for Attendance System */
+
+/* Active break indicator */
+.active-break {
+    background-color: #fff3cd;
+}
+
+.badge-active {
+    background-color: #ffc107;
+    color: #000;
+}
+
+/* Penalty level colors (for records table) */
+.penalty-0 {
+    background-color: #d4edda !important; /* green */
+}
+.penalty-1 {
+    background-color: #fff3cd !important; /* yellow */
+}
+.penalty-2 {
+    background-color: #f8d7da !important; /* red */
+}
+.penalty-3 {
+    background-color: #e0d4ff !important; /* violet */
+}
+.penalty-4 {
+    background-color: #8b4513 !important; /* brown-red */
+    color: white !important;
+}
+
+/* Table row hover effect */
+.table tbody tr:hover {
+    filter: brightness(95%);
+}
+
+/* Make tables scrollable on small screens */
+.table-responsive {
+    overflow-x: auto;
+}
+
+/* Card header icons (optional) */
+.card-header i {
+    margin-right: 5px;
+}
+
+/* Custom button spacing */
+.btn + .btn {
+    margin-left: 5px;
+}
+
+.exceeded-smoking {
+    background-color: #000 !important;
+    color: #fff !important;
+}
