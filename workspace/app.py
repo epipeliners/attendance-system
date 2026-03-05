@@ -7,6 +7,17 @@ from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, flash, g
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import io
+from datetime import datetime, timedelta
+import openpyxl
+from openpyxl.styles import Font, Alignment
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import cm
+from flask import send_file, make_response
+
 # ---------- Timezone setup ----------
 import pytz
 TIMEZONE = pytz.timezone('Asia/Jakarta')  # Change to your local timezone
@@ -63,6 +74,31 @@ def execute_db(query, args=()):
         cur = conn.execute(query, args)
         conn.commit()
         return cur.lastrowid
+    
+def get_monthly_report(tahun, bulan, user_id=None, role=None):
+    """Ambil data attendance untuk bulan tertentu. Jika admin, semua user; jika bukan, hanya user sendiri."""
+    start_date = f"{tahun:04d}-{bulan:02d}-01"
+    # Hitung akhir bulan
+    if bulan == 12:
+        end_date = f"{tahun+1:04d}-01-01"
+    else:
+        end_date = f"{tahun:04d}-{bulan+1:02d}-01"
+    
+    query = '''
+        SELECT u.username, a.action, a.timestamp, a.shift, a.late_minutes, a.penalty_level, a.note, a.expected_checkout
+        FROM attendance a
+        JOIN users u ON a.user_id = u.id
+        WHERE a.timestamp >= ? AND a.timestamp < ?
+    '''
+    params = [start_date, end_date]
+    
+    if role != 'admin' and user_id is not None:
+        query += " AND a.user_id = ?"
+        params.append(user_id)
+    
+    query += " ORDER BY a.timestamp"
+    
+    return query_db(query, params)
 
 # ---------- Database initialization ----------
 def init_db():
@@ -327,6 +363,31 @@ def calculate_penalty(late_minutes, user_id, now):
             return 4, 'Hangus Bonus Semester.'
         else:
             return 4, 'Selamat anda Dipecat, Silakan membayar denda 50Juta untuk mengambil data anda dikantor.'
+        
+def get_monthly_report(tahun, bulan, user_id=None, role=None):
+    """Ambil data attendance untuk bulan tertentu. Jika admin, semua user; jika bukan, hanya user sendiri."""
+    start_date = f"{tahun:04d}-{bulan:02d}-01"
+    # Hitung akhir bulan
+    if bulan == 12:
+        end_date = f"{tahun+1:04d}-01-01"
+    else:
+        end_date = f"{tahun:04d}-{bulan+1:02d}-01"
+    
+    query = '''
+        SELECT u.username, a.action, a.timestamp, a.shift, a.late_minutes, a.penalty_level, a.note, a.expected_checkout
+        FROM attendance a
+        JOIN users u ON a.user_id = u.id
+        WHERE a.timestamp >= ? AND a.timestamp < ?
+    '''
+    params = [start_date, end_date]
+    
+    if role != 'admin' and user_id is not None:
+        query += " AND a.user_id = ?"
+        params.append(user_id)
+    
+    query += " ORDER BY a.timestamp"
+    
+    return query_db(query, params)
 
 # ---------- NEW: Debt helpers ----------
 def get_user_debt(user_id):
@@ -406,7 +467,7 @@ def dashboard():
             except:
                 pass
             break
-        
+
     active_smoking = get_active_break(user_id, 'smoking')
     active_toilet = get_active_break(user_id, 'toilet')
     # NEW: Get user debt
@@ -674,7 +735,111 @@ def records():
                               FROM attendance a JOIN users u ON a.user_id = u.id
                               WHERE a.user_id = ?
                               ORDER BY a.timestamp DESC''', [user_id])
-    return render_template('records.html', records=records)
+    now = datetime.now()  # <--- tambahkan ini
+    return render_template('records.html', records=records, now=now)  # <--- kirim ke template
+
+@app.route('/export/excel/<int:tahun>/<int:bulan>')
+@login_required
+def export_excel(tahun, bulan):
+    user_id = session['user_id']
+    role = session['role']
+    
+    data = get_monthly_report(tahun, bulan, user_id, role)
+    
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = f"Laporan {bulan}-{tahun}"
+    
+    headers = ['Username', 'Action', 'Timestamp', 'Shift', 'Late (min)', 'Penalty Level', 'Note', 'Expected Checkout']
+    ws.append(headers)
+    
+    for col in range(1, 9):
+        cell = ws.cell(row=1, column=col)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center')
+    
+    for row in data:
+        ws.append([
+            row['username'],
+            row['action'],
+            row['timestamp'],
+            row['shift'] or '',
+            row['late_minutes'] or '',
+            row['penalty_level'] or '',
+            row['note'] or '',
+            row['expected_checkout'] or ''
+        ])
+    
+    for col in ws.columns:
+        max_length = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2) * 1.2
+        ws.column_dimensions[col_letter].width = min(adjusted_width, 50)
+    
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    filename = f"attendance_{tahun:04d}_{bulan:02d}.xlsx"
+    return send_file(output, download_name=filename, as_attachment=True, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+@app.route('/export/pdf/<int:tahun>/<int:bulan>')
+@login_required
+def export_pdf(tahun, bulan):
+    user_id = session['user_id']
+    role = session['role']
+    
+    data = get_monthly_report(tahun, bulan, user_id, role)
+    
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=1*cm, leftMargin=1*cm, topMargin=1.5*cm, bottomMargin=1*cm)
+    elements = []
+    
+    styles = getSampleStyleSheet()
+    title = f"Laporan Attendance Bulan {bulan:02d}-{tahun:04d}"
+    elements.append(Paragraph(title, styles['Title']))
+    elements.append(Spacer(1, 0.5*cm))
+    
+    table_data = [['Username', 'Action', 'Timestamp', 'Shift', 'Late', 'Penalty', 'Note', 'Expected']]
+    for row in data:
+        note = (row['note'][:30] + '...') if row['note'] and len(row['note']) > 30 else (row['note'] or '')
+        table_data.append([
+            row['username'],
+            row['action'],
+            row['timestamp'],
+            row['shift'] or '',
+            str(row['late_minutes'] or ''),
+            str(row['penalty_level'] or ''),
+            note,
+            row['expected_checkout'] or ''
+        ])
+    
+    table = Table(table_data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.grey),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,0), 10),
+        ('BOTTOMPADDING', (0,0), (-1,0), 8),
+        ('BACKGROUND', (0,1), (-1,-1), colors.beige),
+        ('GRID', (0,0), (-1,-1), 1, colors.black),
+        ('FONTSIZE', (0,1), (-1,-1), 8),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+    ]))
+    
+    elements.append(table)
+    doc.build(elements)
+    
+    buffer.seek(0)
+    filename = f"attendance_{tahun:04d}_{bulan:02d}.pdf"
+    return send_file(buffer, download_name=filename, as_attachment=True, mimetype='application/pdf')
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
