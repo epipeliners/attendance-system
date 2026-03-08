@@ -4,11 +4,9 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, send_file
 from werkzeug.security import check_password_hash, generate_password_hash
-
 import io
-from datetime import datetime, timedelta
 import openpyxl
 from openpyxl.styles import Font, Alignment
 from reportlab.lib import colors
@@ -16,17 +14,16 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
-from flask import send_file, make_response
+import pytz
 
 # ---------- Timezone setup ----------
-import pytz
-TIMEZONE = pytz.timezone('Asia/Jakarta')  # Change to your local timezone
+TIMEZONE = pytz.timezone('Asia/Jakarta')
 
 def now_local():
     return datetime.now(TIMEZONE)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'change-this-to-a-secure-random-key')
+app.secret_key = os.environ.get('SECRET_KEY', 'default-secret-key-change-in-production')
 
 # ---------- Database connection helpers ----------
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -74,31 +71,6 @@ def execute_db(query, args=()):
         cur = conn.execute(query, args)
         conn.commit()
         return cur.lastrowid
-    
-def get_monthly_report(tahun, bulan, user_id=None, role=None):
-    """Ambil data attendance untuk bulan tertentu. Jika admin, semua user; jika bukan, hanya user sendiri."""
-    start_date = f"{tahun:04d}-{bulan:02d}-01"
-    # Hitung akhir bulan
-    if bulan == 12:
-        end_date = f"{tahun+1:04d}-01-01"
-    else:
-        end_date = f"{tahun:04d}-{bulan+1:02d}-01"
-    
-    query = '''
-        SELECT u.username, a.action, a.timestamp, a.shift, a.late_minutes, a.penalty_level, a.note, a.expected_checkout
-        FROM attendance a
-        JOIN users u ON a.user_id = u.id
-        WHERE a.timestamp >= ? AND a.timestamp < ?
-    '''
-    params = [start_date, end_date]
-    
-    if role != 'admin' and user_id is not None:
-        query += " AND a.user_id = ?"
-        params.append(user_id)
-    
-    query += " ORDER BY a.timestamp"
-    
-    return query_db(query, params)
 
 # ---------- Database initialization ----------
 def init_db():
@@ -106,13 +78,14 @@ def init_db():
     conn = get_db()
     if DATABASE_URL and DATABASE_URL.startswith('postgres'):
         cur = conn.cursor()
-        # Users table
+        # Users table with default_shift
         cur.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 username TEXT UNIQUE NOT NULL,
                 password TEXT NOT NULL,
-                role TEXT NOT NULL
+                role TEXT NOT NULL,
+                default_shift TEXT DEFAULT 'auto'
             )
         ''')
         # Attendance table
@@ -160,7 +133,7 @@ def init_db():
                 value TEXT NOT NULL
             )
         ''')
-        # ---------- NEW: User debt table ----------
+        # User debt table
         cur.execute('''
             CREATE TABLE IF NOT EXISTS user_debt (
                 user_id INTEGER PRIMARY KEY,
@@ -174,8 +147,7 @@ def init_db():
         if cur.fetchone()['count'] == 0:
             default_rules = [
                 ('max_breaks_per_day', '3'),
-                ('max_smoking_minutes', '10'),
-                ('normal_work_hours', '8')
+                ('max_smoking_minutes', '10')
             ]
             for name, val in default_rules:
                 cur.execute("INSERT INTO rules (rule_name, value) VALUES (%s, %s)", (name, val))
@@ -188,7 +160,8 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
                 password TEXT NOT NULL,
-                role TEXT NOT NULL
+                role TEXT NOT NULL,
+                default_shift TEXT DEFAULT 'auto'
             )
         ''')
         conn.execute('''
@@ -232,7 +205,6 @@ def init_db():
                 value TEXT NOT NULL
             )
         ''')
-        # ---------- NEW: User debt table ----------
         conn.execute('''
             CREATE TABLE IF NOT EXISTS user_debt (
                 user_id INTEGER PRIMARY KEY,
@@ -245,8 +217,7 @@ def init_db():
         if cur.fetchone()[0] == 0:
             default_rules = [
                 ('max_breaks_per_day', '3'),
-                ('max_smoking_minutes', '10'),
-                ('normal_work_hours', '8')
+                ('max_smoking_minutes', '10')
             ]
             for name, val in default_rules:
                 conn.execute("INSERT INTO rules (rule_name, value) VALUES (?, ?)", (name, val))
@@ -282,7 +253,6 @@ def get_active_break(user_id, break_type):
                        ORDER BY start_time DESC LIMIT 1''', 
                     [user_id, break_type], one=True)
     if row:
-        # Convert to dict to allow modification
         row_dict = dict(row)
         start_naive = datetime.strptime(row_dict['start_time'], '%Y-%m-%d %H:%M:%S')
         row_dict['start_time'] = TIMEZONE.localize(start_naive)
@@ -316,58 +286,85 @@ def count_monthly_late_level4(user_id, current_date):
                       [user_id, first_day_str, today_str], one=True)
     return result['cnt'] if result else 0
 
-def determine_shift_and_official_start(now):
+def determine_user_shift(user_id, now):
     """
-    Determine shift based on current time (aware datetime).
-    Morning shift: official 10:00 same day (if between 06:00 and 15:00)
-    Night shift: official 22:00 of previous day (if after midnight) or same day (if before midnight)
-    Returns (shift, official_start_datetime) or (None, None) if outside shift windows.
+    Determine shift for a user based on their default_shift setting and current time.
+    Returns (shift, official_start_datetime, warning_note)
     """
+    # Ambil default shift user dari database
+    user = query_db('SELECT default_shift FROM users WHERE id = ?', [user_id], one=True)
+    user_shift = user['default_shift'] if user else 'auto'
+    
     local_time = now.astimezone(TIMEZONE)
-    if 6 <= local_time.hour < 15:
+    current_hour = local_time.hour
+    warning_note = None
+    
+    # Jika user punya shift tetap (misal lagi shift malam karena tukaran)
+    if user_shift == 'morning':
         shift = 'morning'
         official = local_time.replace(hour=10, minute=0, second=0, microsecond=0)
-    elif local_time.hour >= 20 or local_time.hour < 6:
+        # Jika check-in di luar jam morning shift, beri warning
+        if current_hour < 10 or current_hour >= 22:
+            warning_note = f"Warning: Check-in at {current_hour}:00 outside morning shift hours"
+        return shift, official, warning_note
+    
+    elif user_shift == 'night':
         shift = 'night'
-        if local_time.hour < 6:
-            previous_day = local_time - timedelta(days=1)
-            official = previous_day.replace(hour=22, minute=0, second=0, microsecond=0)
+        if current_hour < 10:
+            # Setelah midnight, official start yesterday 22:00
+            yesterday = local_time - timedelta(days=1)
+            official = yesterday.replace(hour=22, minute=0, second=0, microsecond=0)
         else:
             official = local_time.replace(hour=22, minute=0, second=0, microsecond=0)
-    else:
-        return None, None
-    return shift, official
-
-def calculate_penalty(late_minutes, user_id, now):
-    """
-    Return (penalty_level, note) based on late minutes and monthly history.
-    Level 0: on time (<=1 min)
-    Level 1: 2-10 min -> Extend 1 Jam
-    Level 2: 11-30 min -> Extend 2 Jam
-    Level 3: 31-59 min -> Extend 2 Jam 3 Hari
-    Level 4: >=60 min, with cumulative monthly sanctions
-    """
-    if late_minutes <= 1:
-        return 0, 'On time'
-    elif late_minutes <= 10:
-        return 1, 'Extend 1 Jam'
-    elif late_minutes <= 30:
-        return 2, 'Extend 2 Jam'
-    elif late_minutes <= 59:
-        return 3, 'Extend 2 Jam 3 Hari'
-    else:
-        count_l4 = count_monthly_late_level4(user_id, now)
-        if count_l4 == 0:
-            return 4, 'Extend 2 Jam 3 Hari dan hangus OFFDAY 1x dalam 1 bulan.'
-        elif count_l4 == 1:
-            return 4, 'Hangus Bonus Semester.'
-        else:
-            return 4, 'Selamat anda Dipecat, Silakan membayar denda 50Juta untuk mengambil data anda dikantor.'
         
+        # Jika check-in di luar jam night shift, beri warning
+        if 10 <= current_hour < 22:
+            warning_note = f"Warning: Check-in at {current_hour}:00 outside night shift hours"
+        return shift, official, warning_note
+    
+    # Auto shift (berdasarkan waktu)
+    else:
+        if 10 <= current_hour < 22:
+            shift = 'morning'
+            official = local_time.replace(hour=10, minute=0, second=0, microsecond=0)
+        elif current_hour >= 22 or current_hour < 10:
+            shift = 'night'
+            if current_hour < 10:
+                yesterday = local_time - timedelta(days=1)
+                official = yesterday.replace(hour=22, minute=0, second=0, microsecond=0)
+            else:
+                official = local_time.replace(hour=22, minute=0, second=0, microsecond=0)
+        else:
+            shift = 'morning'  # default
+            official = local_time.replace(hour=10, minute=0, second=0, microsecond=0)
+        
+        return shift, official, None
+
+def get_user_debt(user_id):
+    """Return owed minutes for user, default 0."""
+    row = query_db('SELECT owed_minutes FROM user_debt WHERE user_id = ?', [user_id], one=True)
+    return row['owed_minutes'] if row else 0
+
+def update_user_debt(user_id, delta_minutes):
+    """Add delta_minutes to user's debt (can be negative). Debt never goes below 0."""
+    current = get_user_debt(user_id)
+    new_debt = max(0, current + delta_minutes)
+    now_str = now_local().strftime('%Y-%m-%d %H:%M:%S')
+    if DATABASE_URL and DATABASE_URL.startswith('postgres'):
+        execute_db('''
+            INSERT INTO user_debt (user_id, owed_minutes, updated_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE
+            SET owed_minutes = EXCLUDED.owed_minutes, updated_at = EXCLUDED.updated_at
+        ''', [user_id, new_debt, now_str])
+    else:
+        execute_db('REPLACE INTO user_debt (user_id, owed_minutes, updated_at) VALUES (?, ?, ?)',
+                   [user_id, new_debt, now_str])
+    return new_debt
+
 def get_monthly_report(tahun, bulan, user_id=None, role=None):
     """Ambil data attendance untuk bulan tertentu. Jika admin, semua user; jika bukan, hanya user sendiri."""
     start_date = f"{tahun:04d}-{bulan:02d}-01"
-    # Hitung akhir bulan
     if bulan == 12:
         end_date = f"{tahun+1:04d}-01-01"
     else:
@@ -388,30 +385,6 @@ def get_monthly_report(tahun, bulan, user_id=None, role=None):
     query += " ORDER BY a.timestamp"
     
     return query_db(query, params)
-
-# ---------- NEW: Debt helpers ----------
-def get_user_debt(user_id):
-    """Return owed minutes for user, default 0."""
-    row = query_db('SELECT owed_minutes FROM user_debt WHERE user_id = ?', [user_id], one=True)
-    return row['owed_minutes'] if row else 0
-
-def update_user_debt(user_id, delta_minutes):
-    """Add delta_minutes to user's debt (can be negative). Debt never goes below 0."""
-    current = get_user_debt(user_id)
-    new_debt = max(0, current + delta_minutes)
-    now_str = now_local().strftime('%Y-%m-%d %H:%M:%S')
-    if DATABASE_URL and DATABASE_URL.startswith('postgres'):
-        execute_db('''
-            INSERT INTO user_debt (user_id, owed_minutes, updated_at)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (user_id) DO UPDATE
-            SET owed_minutes = EXCLUDED.owed_minutes, updated_at = EXCLUDED.updated_at
-        ''', [user_id, new_debt, now_str])
-    else:
-        # SQLite: REPLACE works because user_id is PRIMARY KEY
-        execute_db('REPLACE INTO user_debt (user_id, owed_minutes, updated_at) VALUES (?, ?, ?)',
-                   [user_id, new_debt, now_str])
-    return new_debt
 
 # ---------- Routes ----------
 @app.route('/')
@@ -449,7 +422,6 @@ def dashboard():
     role = session['role']
     now = now_local()
     today = now.strftime('%Y-%m-%d')
-    # Get today's actions
     check_ins = query_db('''SELECT action, timestamp, note FROM attendance
                             WHERE user_id = ? AND DATE(timestamp) = ?
                             ORDER BY timestamp''', [user_id, today])
@@ -457,8 +429,8 @@ def dashboard():
                                WHERE user_id = ? AND DATE(start_time) = ?
                                ORDER BY start_time''', [user_id, today])
     rules = query_db('SELECT rule_name, value FROM rules')
-
-    # Ambil max_smoking_minutes dari rules (default 10)
+    
+    # Ambil max_smoking_minutes dari rules
     max_smoking = 10
     for r in rules:
         if r['rule_name'] == 'max_smoking_minutes':
@@ -467,15 +439,15 @@ def dashboard():
             except:
                 pass
             break
-
+    
     active_smoking = get_active_break(user_id, 'smoking')
     active_toilet = get_active_break(user_id, 'toilet')
-    # NEW: Get user debt
     user_debt = get_user_debt(user_id)
-    return render_template('dashboard.html', 
-                           records=check_ins, 
+    
+    return render_template('dashboard.html',
+                           records=check_ins,
                            breaks=breaks_today,
-                           rules=rules, 
+                           rules=rules,
                            role=role,
                            active_smoking=active_smoking,
                            active_toilet=active_toilet,
@@ -485,7 +457,6 @@ def dashboard():
 @app.route('/action/<path:action>')
 @login_required
 def record_action(action):
-    # NEW: Added 'Sick Check Out'
     allowed_actions = [
         'Check In', 'Check Out', 'Sick Check Out',
         'Smoking Start', 'Smoking Stop',
@@ -509,30 +480,56 @@ def record_action(action):
             flash('Already checked in today.', 'warning')
             return redirect(url_for('dashboard'))
 
-        shift, official_start = determine_shift_and_official_start(now)
-        if not shift:
-            flash('Check‑in time is outside recognised shift hours (morning 06:00-15:00, night 20:00-05:59).', 'danger')
-            return redirect(url_for('dashboard'))
+        # Tentukan shift berdasarkan user preference
+        shift, official_start, warning_note = determine_user_shift(user_id, now)
+        
+        # Catat warning note jika ada
+        final_note = warning_note if warning_note else None
 
+        # Hitung keterlambatan (menit)
         late_minutes = max(0, (now - official_start).total_seconds() / 60.0)
-        level, note = calculate_penalty(late_minutes, user_id, now)
-
-        rule = query_db('SELECT value FROM rules WHERE rule_name = ?', ['normal_work_hours'], one=True)
-        normal_hours = int(rule['value']) if rule else 8
-        extra_hours = 0
-        if level == 1:
+        
+        # Tentukan penalti berdasarkan keterlambatan
+        if late_minutes <= 1:
+            level, penalty_note = 0, 'On time'
+            extra_hours = 0
+        elif late_minutes <= 10:
+            level, penalty_note = 1, 'Extend 1 Jam'
             extra_hours = 1
-        elif level >= 2:
+        elif late_minutes <= 30:
+            level, penalty_note = 2, 'Extend 2 Jam'
             extra_hours = 2
-        expected_checkout = official_start + timedelta(hours=normal_hours + extra_hours)
+        elif late_minutes <= 59:
+            level, penalty_note = 3, 'Extend 2 Jam 3 Hari'
+            extra_hours = 2
+        else:  # >= 60 menit
+            # Cek riwayat keterlambatan level 4 bulan ini
+            count_l4 = count_monthly_late_level4(user_id, now)
+            if count_l4 == 0:
+                level, penalty_note = 4, 'Extend 2 Jam 3 Hari dan hangus OFFDAY 1x dalam 1 bulan.'
+            elif count_l4 == 1:
+                level, penalty_note = 4, 'Hangus Bonus Semester.'
+            else:
+                level, penalty_note = 4, 'Selamat anda Dipecat, Silakan membayar denda 50Juta untuk mengambil data anda dikantor.'
+            extra_hours = 2
+
+        # Gabungkan note
+        if final_note:
+            combined_note = f"{penalty_note} | {final_note}"
+        else:
+            combined_note = penalty_note
+
+        # Expected checkout = check-in time + 12 jam + extra hours
+        work_hours = 12 + extra_hours
+        expected_checkout = now + timedelta(hours=work_hours)
         expected_str = expected_checkout.strftime('%Y-%m-%d %H:%M:%S')
 
         execute_db('''INSERT INTO attendance 
                       (user_id, action, timestamp, note, shift, late_minutes, penalty_level, expected_checkout)
                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                   [user_id, action, now_str, note, shift, late_minutes, level, expected_str])
+                   [user_id, action, now_str, combined_note, shift, late_minutes, level, expected_str])
 
-        flash(f'Check In recorded at {now_str}. {note}', 'success')
+        flash(f'Check In recorded at {now_str}. {combined_note}', 'success')
         return redirect(url_for('dashboard'))
 
     # ----- Check Out or Sick Check Out -----
@@ -542,10 +539,9 @@ def record_action(action):
                               ORDER BY timestamp DESC LIMIT 1''',
                            [user_id, today], one=True)
         if not checkin:
-            flash('No check‑in found for today.', 'warning')
+            flash('No check-in found for today.', 'warning')
             return redirect(url_for('dashboard'))
 
-        # Check if already checked out (any kind)
         checkout_exists = query_db('''SELECT id FROM attendance 
                                       WHERE user_id = ? AND DATE(timestamp) = ? AND action IN ('Check Out', 'Sick Check Out')''',
                                    [user_id, today], one=True)
@@ -555,33 +551,44 @@ def record_action(action):
 
         expected_naive = datetime.strptime(checkin['expected_checkout'], '%Y-%m-%d %H:%M:%S')
         expected = TIMEZONE.localize(expected_naive)
+        
+        # Parse check-in time
+        checkin_time = datetime.strptime(checkin['timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=TIMEZONE)
+        work_duration = (now - checkin_time).total_seconds() / 3600
 
         if action == 'Check Out':
-            # Normal checkout: must be after expected
-            if now < expected:
-                flash(f'You cannot check out before {expected.strftime("%H:%M")}. Please complete your extended hours.', 'danger')
+            # Cek apakah sudah 12 jam sejak check-in
+            if work_duration < 12:
+                remaining = 12 - work_duration
+                flash(f'Anda harus bekerja minimal 12 jam. Sisa {remaining:.1f} jam lagi.', 'danger')
                 return redirect(url_for('dashboard'))
-            # Compute surplus (positive if later)
-            diff_minutes = (now - expected).total_seconds() / 60.0
-            if diff_minutes > 0:
-                update_user_debt(user_id, -int(diff_minutes))
-            # Record without special note
+            
+            # Hitung surplus (jika lebih dari expected checkout karena penalti)
+            if now > expected:
+                surplus_minutes = (now - expected).total_seconds() / 60.0
+                if surplus_minutes > 0:
+                    update_user_debt(user_id, -int(surplus_minutes))
+            
             execute_db('INSERT INTO attendance (user_id, action, timestamp) VALUES (?, ?, ?)',
                        [user_id, action, now_str])
             flash(f'{action} recorded at {now_str}', 'success')
+        
         else:  # Sick Check Out
-            # Compute deficit (how much they left early)
-            diff_minutes = (expected - now).total_seconds() / 60.0  # positive if early
+            # Hitung defisit (berapa jam yang belum dipenuhi)
+            deficit_hours = max(0, 12 - work_duration)
+            
             note = None
-            if diff_minutes > 0:
-                new_debt = update_user_debt(user_id, int(diff_minutes))
+            if deficit_hours > 0:
+                deficit_minutes = int(deficit_hours * 60)
+                new_debt = update_user_debt(user_id, deficit_minutes)
                 hours = new_debt // 60
                 minutes = new_debt % 60
                 note = f'Sisa anda extend tinggal {hours} jam {minutes} menit.'
-            # Record with note
+            
             execute_db('INSERT INTO attendance (user_id, action, timestamp, note) VALUES (?, ?, ?, ?)',
                        [user_id, action, now_str, note])
             flash(f'{action} recorded at {now_str}', 'success')
+        
         return redirect(url_for('dashboard'))
 
     # ----- Break Actions -----
@@ -651,7 +658,7 @@ def record_action(action):
             flash(f'{action} recorded. Duration: {duration_int} minutes.', 'success')
             return redirect(url_for('dashboard'))
 
-# ---------- Admin routes (unchanged) ----------
+# ---------- Admin routes ----------
 @app.route('/off-day', methods=['GET', 'POST'])
 @login_required
 @admin_required
@@ -687,13 +694,13 @@ def users():
         role = request.form['role']
         hashed_password = generate_password_hash(password)
         try:
-            execute_db('INSERT INTO users (username, password, role) VALUES (?, ?, ?)',
-                       [username, hashed_password, role])
+            execute_db('INSERT INTO users (username, password, role, default_shift) VALUES (?, ?, ?, ?)',
+                       [username, hashed_password, role, 'auto'])
             flash(f'User {username} added successfully.', 'success')
         except Exception:
             flash(f'Username {username} already exists.', 'danger')
         return redirect(url_for('users'))
-    user_list = query_db('SELECT id, username, role FROM users ORDER BY id')
+    user_list = query_db('SELECT id, username, role, default_shift FROM users ORDER BY id')
     return render_template('users.html', users=user_list)
 
 @app.route('/delete-user/<int:user_id>')
@@ -706,6 +713,25 @@ def delete_user(user_id):
     execute_db('DELETE FROM users WHERE id = ?', [user_id])
     flash('User deleted successfully.', 'success')
     return redirect(url_for('users'))
+
+@app.route('/user-shifts')
+@login_required
+@admin_required
+def user_shifts():
+    users = query_db('SELECT id, username, role, default_shift FROM users ORDER BY id')
+    return render_template('user_shifts.html', users=users)
+
+@app.route('/set-user-shift/<int:user_id>/<shift>')
+@login_required
+@admin_required
+def set_user_shift(user_id, shift):
+    if shift not in ['morning', 'night', 'auto']:
+        flash('Invalid shift value.', 'danger')
+        return redirect(url_for('user_shifts'))
+    
+    execute_db('UPDATE users SET default_shift = ? WHERE id = ?', [shift, user_id])
+    flash(f'User shift updated to {shift}.', 'success')
+    return redirect(url_for('user_shifts'))
 
 @app.route('/rules', methods=['GET', 'POST'])
 @login_required
@@ -735,29 +761,28 @@ def records():
                               FROM attendance a JOIN users u ON a.user_id = u.id
                               WHERE a.user_id = ?
                               ORDER BY a.timestamp DESC''', [user_id])
-    now = datetime.now()  # <--- tambahkan ini
-    return render_template('records.html', records=records, now=now)  # <--- kirim ke template
+    now = datetime.now()
+    return render_template('records.html', records=records, now=now)
 
 @app.route('/export/excel/<int:tahun>/<int:bulan>')
 @login_required
 def export_excel(tahun, bulan):
     user_id = session['user_id']
     role = session['role']
-    
     data = get_monthly_report(tahun, bulan, user_id, role)
-    
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = f"Laporan {bulan}-{tahun}"
-    
+
     headers = ['Username', 'Action', 'Timestamp', 'Shift', 'Late (min)', 'Penalty Level', 'Note', 'Expected Checkout']
     ws.append(headers)
-    
+
     for col in range(1, 9):
         cell = ws.cell(row=1, column=col)
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal='center')
-    
+
     for row in data:
         ws.append([
             row['username'],
@@ -769,7 +794,7 @@ def export_excel(tahun, bulan):
             row['note'] or '',
             row['expected_checkout'] or ''
         ])
-    
+
     for col in ws.columns:
         max_length = 0
         col_letter = col[0].column_letter
@@ -781,11 +806,11 @@ def export_excel(tahun, bulan):
                 pass
         adjusted_width = (max_length + 2) * 1.2
         ws.column_dimensions[col_letter].width = min(adjusted_width, 50)
-    
+
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
-    
+
     filename = f"attendance_{tahun:04d}_{bulan:02d}.xlsx"
     return send_file(output, download_name=filename, as_attachment=True, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
@@ -794,18 +819,17 @@ def export_excel(tahun, bulan):
 def export_pdf(tahun, bulan):
     user_id = session['user_id']
     role = session['role']
-    
     data = get_monthly_report(tahun, bulan, user_id, role)
-    
+
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=1*cm, leftMargin=1*cm, topMargin=1.5*cm, bottomMargin=1*cm)
     elements = []
-    
+
     styles = getSampleStyleSheet()
     title = f"Laporan Attendance Bulan {bulan:02d}-{tahun:04d}"
     elements.append(Paragraph(title, styles['Title']))
     elements.append(Spacer(1, 0.5*cm))
-    
+
     table_data = [['Username', 'Action', 'Timestamp', 'Shift', 'Late', 'Penalty', 'Note', 'Expected']]
     for row in data:
         note = (row['note'][:30] + '...') if row['note'] and len(row['note']) > 30 else (row['note'] or '')
@@ -819,7 +843,7 @@ def export_pdf(tahun, bulan):
             note,
             row['expected_checkout'] or ''
         ])
-    
+
     table = Table(table_data, repeatRows=1)
     table.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.grey),
@@ -833,13 +857,54 @@ def export_pdf(tahun, bulan):
         ('FONTSIZE', (0,1), (-1,-1), 8),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
     ]))
-    
+
     elements.append(table)
     doc.build(elements)
-    
+
     buffer.seek(0)
     filename = f"attendance_{tahun:04d}_{bulan:02d}.pdf"
     return send_file(buffer, download_name=filename, as_attachment=True, mimetype='application/pdf')
+
+@app.route('/admin/clear-logs', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def clear_logs():
+    if request.method == 'POST':
+        days = request.form.get('days', type=int)
+        table = request.form.get('table')
+        confirm = request.form.get('confirm')
+        
+        if confirm != 'DELETE':
+            flash('Please type DELETE to confirm.', 'danger')
+            return redirect(url_for('clear_logs'))
+        
+        if table == 'attendance':
+            if days and days > 0:
+                cutoff = now_local() - timedelta(days=days)
+                cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+                execute_db('DELETE FROM attendance WHERE timestamp < ?', [cutoff_str])
+                flash(f'Deleted attendance records older than {days} days.', 'success')
+            else:
+                execute_db('DELETE FROM attendance')
+                flash('Deleted all attendance records.', 'success')
+        elif table == 'breaks':
+            if days and days > 0:
+                cutoff = now_local() - timedelta(days=days)
+                cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+                execute_db('DELETE FROM breaks WHERE start_time < ?', [cutoff_str])
+                flash(f'Deleted break records older than {days} days.', 'success')
+            else:
+                execute_db('DELETE FROM breaks')
+                flash('Deleted all break records.', 'success')
+        elif table == 'user_debt':
+            execute_db('UPDATE user_debt SET owed_minutes = 0, updated_at = ?', [now_local().strftime('%Y-%m-%d %H:%M:%S')])
+            flash('All user debts have been reset to 0.', 'success')
+        else:
+            flash('Invalid selection.', 'danger')
+        
+        return redirect(url_for('dashboard'))
+    
+    return render_template('clear_logs.html')
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

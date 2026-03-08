@@ -170,9 +170,11 @@
                     </div>
                     <div class="card-body">
                         <a href="{{ url_for('users') }}" class="btn btn-outline-primary mb-2 w-100">Manage Users</a>
+                        <a href="{{ url_for('user_shifts') }}" class="btn btn-outline-info mb-2 w-100">Manage User Shifts</a>
                         <a href="{{ url_for('off_day') }}" class="btn btn-outline-primary mb-2 w-100">Manage Off Days</a>
                         <a href="{{ url_for('rules') }}" class="btn btn-outline-primary mb-2 w-100">Manage Rules</a>
                         <a href="{{ url_for('records') }}" class="btn btn-outline-primary w-100">View All Records</a>
+                        <a href="{{ url_for('clear_logs') }}" class="btn btn-outline-danger mb-2 w-100">Clear Logs</a>
                     </div>
                 </div>
             </div>

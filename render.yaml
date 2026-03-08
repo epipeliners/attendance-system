@@ -1,0 +1,2 @@
+# Example build command in Render dashboard or render.yaml
+apt-get update && apt-get install -y libpq-dev gcc && pip install -r requirements.txt
