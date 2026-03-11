@@ -19,6 +19,8 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
 import pytz
 import re
+from ip_manager.ip_routes import ip_bp
+from ip_manager.ip_model import IPModel
 
 # ---------- Timezone setup ----------
 TIMEZONE = pytz.timezone('Asia/Jakarta')
@@ -165,6 +167,22 @@ def init_db():
         conn = get_db()
         if DATABASE_URL and DATABASE_URL.startswith('postgres'):
             cur = conn.cursor()
+
+            # 🔥 TABEL IP LOGS
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS ip_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    ip_address TEXT NOT NULL,
+                    user_agent TEXT,
+                    action TEXT DEFAULT 'login',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+            ''')
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_user_id ON ip_logs(user_id)')
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_created_at ON ip_logs(created_at)')
+
             # Users table with default_shift
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -256,6 +274,20 @@ def init_db():
             cur.close()
         else:
             # SQLite
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS ip_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    ip_address TEXT NOT NULL,
+                    user_agent TEXT,
+                    action TEXT DEFAULT 'login',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_user_id ON ip_logs(user_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_created_at ON ip_logs(created_at)')
+
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -535,6 +567,33 @@ def get_monthly_report(tahun, bulan, user_id=None, role=None):
     except Exception as e:
         app.logger.error(f"Error in get_monthly_report: {str(e)}")
         return []
+    
+# ---------- IP Address Logging Functions ----------
+def get_client_ip():
+    """Dapatkan IP address client dari request."""
+    if request.headers.get('X-Forwarded-For'):
+        ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    elif request.headers.get('X-Real-IP'):
+        ip = request.headers.get('X-Real-IP')
+    else:
+        ip = request.remote_addr
+    return ip
+
+def log_user_ip(user_id, action='login'):
+    """Catat IP address user ke database."""
+    try:
+        ip_address = get_client_ip()
+        user_agent = request.headers.get('User-Agent')
+        now_str = now_local().strftime('%Y-%m-%d %H:%M:%S')
+        
+        execute_db('''
+            INSERT INTO ip_logs (user_id, ip_address, user_agent, action, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', [user_id, ip_address, user_agent, action, now_str])
+        
+        app.logger.info(f"IP logged for user {user_id}: {ip_address}")
+    except Exception as e:
+        app.logger.error(f"Error logging IP: {str(e)}")
 
 # ---------- Routes ----------
 @app.route('/')
@@ -564,6 +623,13 @@ def login():
                 session['user_id'] = user['id']
                 session['username'] = user['username']
                 session['role'] = user['role']
+
+                # 🔥 CATAT IP ADDRESS
+                ip_address = request.remote_addr
+                user_agent = request.headers.get('User-Agent')
+                from ip_manager.ip_model import IPModel
+                IPModel.log_ip(user['id'], ip_address, user_agent, 'login')
+
                 flash('Login successful.', 'success')
                 app.logger.info(f"User {username} logged in successfully")
                 return redirect(url_for('dashboard'))
@@ -1032,6 +1098,31 @@ def records():
         flash('An error occurred loading records.', 'danger')
         return redirect(url_for('dashboard'))
 
+@app.route('/my-ips')
+@login_required
+def my_ips():
+    """Lihat riwayat IP sendiri."""
+    user_id = session['user_id']
+    
+    # Ambil riwayat IP
+    ips = query_db('''
+        SELECT * FROM ip_logs 
+        WHERE user_id = ? 
+        ORDER BY created_at DESC 
+        LIMIT 100
+    ''', [user_id])
+    
+    # Ambil IP unik
+    unique_ips = query_db('''
+        SELECT DISTINCT ip_address, COUNT(*) as count, MAX(created_at) as last_seen
+        FROM ip_logs 
+        WHERE user_id = ? 
+        GROUP BY ip_address
+        ORDER BY last_seen DESC
+    ''', [user_id])
+    
+    return render_template('my_ips.html', ips=ips, unique_ips=unique_ips)
+
 @app.route('/export/excel/<int:tahun>/<int:bulan>')
 @login_required
 def export_excel(tahun, bulan):
@@ -1193,6 +1284,41 @@ def clear_logs():
         app.logger.error(f"Error in clear_logs route: {str(e)}")
         flash('An error occurred.', 'danger')
         return redirect(url_for('dashboard'))
+    
+@app.route('/admin/all-ips')
+@login_required
+@admin_required
+def all_ips():
+    """Admin lihat semua IP."""
+    # Statistik per user
+    stats = query_db('''
+        SELECT 
+            u.id as user_id,
+            u.username,
+            COUNT(DISTINCT l.ip_address) as unique_ips,
+            COUNT(l.id) as total_logins,
+            MAX(l.created_at) as last_login,
+            (
+                SELECT ip_address FROM ip_logs l2 
+                WHERE l2.user_id = u.id 
+                ORDER BY created_at DESC LIMIT 1
+            ) as last_ip
+        FROM users u
+        LEFT JOIN ip_logs l ON u.id = l.user_id
+        GROUP BY u.id, u.username
+        ORDER BY last_login DESC
+    ''')
+    
+    # Semua log terbaru
+    logs = query_db('''
+        SELECT l.*, u.username 
+        FROM ip_logs l
+        JOIN users u ON l.user_id = u.id
+        ORDER BY l.created_at DESC 
+        LIMIT 1000
+    ''')
+    
+    return render_template('all_ips.html', stats=stats, logs=logs)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
