@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IP Whitelist Management</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">Attendance System (Admin)</a>
+            <div class="collapse navbar-collapse">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('logout') }}">Logout</a></li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <h2>IP Whitelist Management</h2>
+        <p class="text-muted">Atur IP address yang diizinkan mengakses aplikasi.</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <!-- Settings -->
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5>Whitelist Settings</h5>
+            </div>
+            <div class="card-body">
+                <form method="post" action="{{ url_for('whitelist_settings') }}">
+                    <div class="row">
+                        <div class="col-md-4">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="enabled" name="enabled" {% if settings.ip_whitelist_enabled == 'true' %}checked{% endif %}>
+                                <label class="form-check-label" for="enabled">Enable IP Whitelist</label>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="exclude_admins" name="exclude_admins" {% if settings.whitelist_exclude_admins == 'true' %}checked{% endif %}>
+                                <label class="form-check-label" for="exclude_admins">Exclude Admins (admins always allowed)</label>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <button type="submit" class="btn btn-primary">Save Settings</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Add IP Form -->
+        <div class="card mb-4">
+            <div class="card-header bg-success text-white">
+                <h5>Add IP Address</h5>
+            </div>
+            <div class="card-body">
+                <form method="post" action="{{ url_for('whitelist_add') }}">
+                    <div class="row">
+                        <div class="col-md-4">
+                            <input type="text" class="form-control" name="ip_address" placeholder="IP Address (e.g., 192.168.1.1)" required>
+                        </div>
+                        <div class="col-md-6">
+                            <input type="text" class="form-control" name="description" placeholder="Description (e.g., Office WiFi)">
+                        </div>
+                        <div class="col-md-2">
+                            <button type="submit" class="btn btn-success w-100">Add IP</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- IP List -->
+        <div class="card">
+            <div class="card-header bg-info text-white">
+                <h5>Whitelisted IPs</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>IP Address</th>
+                            <th>Description</th>
+                            <th>Added By</th>
+                            <th>Added Date</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for ip in ips %}
+                        <tr>
+                            <td><code>{{ ip.ip_address }}</code></td>
+                            <td>{{ ip.description or '-' }}</td>
+                            <td>{{ ip.creator_name or 'System' }}</td>
+                            <td>{{ ip.created_at }}</td>
+                            <td>
+                                {% if ip.is_active %}
+                                    <span class="badge bg-success">Active</span>
+                                {% else %}
+                                    <span class="badge bg-secondary">Inactive</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <a href="{{ url_for('whitelist_toggle', ip_id=ip.id) }}" class="btn btn-sm btn-warning">
+                                    <i class="fas fa-toggle-{% if ip.is_active %}on{% else %}off{% endif %}"></i>
+                                </a>
+                                <a href="{{ url_for('whitelist_delete', ip_id=ip.id) }}" class="btn btn-sm btn-danger" onclick="return confirm('Delete this IP?')">
+                                    <i class="fas fa-trash"></i>
+                                </a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                        {% if not ips %}
+                        <tr>
+                            <td colspan="6" class="text-center">No IPs in whitelist yet.</td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Current IP Info -->
+        <div class="card mt-4">
+            <div class="card-header bg-secondary text-white">
+                <h5>Your Current IP</h5>
+            </div>
+            <div class="card-body">
+                <p class="mb-0">Your IP address: <code>{{ request.remote_addr }}</code></p>
+                <small class="text-muted">Add this IP if you're being blocked.</small>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

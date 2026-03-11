@@ -1,6 +1,5 @@
 """
 IP Manager Module
-Module mandiri untuk mengelola IP address user.
 """
 from ip_manager.ip_model import IPModel
 from ip_manager.ip_routes import ip_bp

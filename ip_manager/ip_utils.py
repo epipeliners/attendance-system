@@ -8,13 +8,10 @@ def get_client_ip():
     Dapatkan IP address client dari request.
     Handle berbagai proxy/load balancer.
     """
-    # Cek header X-Forwarded-For (untuk proxy/load balancer)
     if request.headers.get('X-Forwarded-For'):
         ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
-    # Cek header X-Real-IP (untuk nginx)
     elif request.headers.get('X-Real-IP'):
         ip = request.headers.get('X-Real-IP')
-    # Fallback ke remote_addr
     else:
         ip = request.remote_addr
     return ip

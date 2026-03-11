@@ -445,7 +445,7 @@ def main():
     print("="*60)
     print("\n📝 Default admin login:")
     print("   Username: admin")
-    print("   Password: admincoy123")
+    print("   Password: admin123")
     print("\n⚠️  JANGAN LUPA UBAH PASSWORD ADMIN SETELAH LOGIN PERTAMA!")
     print("="*60)
 

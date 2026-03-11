@@ -1,8 +1,68 @@
 """
 Model untuk mengelola IP address user.
 """
-from utils.database import query_db, execute_db
-from utils.helpers import now_local, format_datetime
+from flask import g
+import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from datetime import datetime
+import os
+
+# Ambil DATABASE_URL dari environment
+DATABASE_URL = os.environ.get('DATABASE_URL')
+
+def get_db():
+    """Get database connection - copy dari app.py"""
+    if DATABASE_URL and DATABASE_URL.startswith('postgres'):
+        if not hasattr(g, '_database'):
+            g._database = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        return g._database
+    else:
+        db = getattr(g, '_database', None)
+        if db is None:
+            db = g._database = sqlite3.connect('attendance.db')
+            db.row_factory = sqlite3.Row
+        return db
+
+def query_db(query, args=(), one=False):
+    """Execute query - copy dari app.py"""
+    conn = get_db()
+    if DATABASE_URL and DATABASE_URL.startswith('postgres'):
+        cur = conn.cursor()
+        cur.execute(query.replace('?', '%s'), args)
+        rv = cur.fetchall()
+        cur.close()
+        return (rv[0] if rv else None) if one else rv
+    else:
+        cur = conn.execute(query, args)
+        rv = cur.fetchall()
+        cur.close()
+        return (rv[0] if rv else None) if one else rv
+
+def execute_db(query, args=()):
+    """Execute query that modifies database - copy dari app.py"""
+    conn = get_db()
+    if DATABASE_URL and DATABASE_URL.startswith('postgres'):
+        cur = conn.cursor()
+        cur.execute(query.replace('?', '%s'), args)
+        conn.commit()
+        cur.close()
+        return None
+    else:
+        cur = conn.execute(query, args)
+        conn.commit()
+        return cur.lastrowid
+
+def now_local():
+    """Return current datetime - simple version"""
+    from pytz import timezone
+    return datetime.now(timezone('Asia/Jakarta'))
+
+def format_datetime(dt):
+    """Format datetime to string"""
+    if isinstance(dt, str):
+        return dt
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 class IPModel:
     """Class untuk mengelola data IP address."""
@@ -10,11 +70,8 @@ class IPModel:
     @staticmethod
     def create_table():
         """Buat tabel ip_logs jika belum ada."""
-        from config import Config
-        from utils.database import get_db
-        
         conn = get_db()
-        if Config.DATABASE_URL and Config.DATABASE_URL.startswith('postgres'):
+        if DATABASE_URL and DATABASE_URL.startswith('postgres'):
             cur = conn.cursor()
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS ip_logs (
@@ -99,35 +156,9 @@ class IPModel:
         ''', [user_id])
     
     @staticmethod
-    def get_stats_by_user():
-        """Dapatkan statistik IP per user untuk admin."""
-        return query_db('''
-            SELECT 
-                u.id as user_id,
-                u.username,
-                COUNT(DISTINCT l.ip_address) as unique_ips,
-                COUNT(l.id) as total_logins,
-                MAX(l.created_at) as last_login,
-                (
-                    SELECT ip_address FROM ip_logs l2 
-                    WHERE l2.user_id = u.id 
-                    ORDER BY created_at DESC LIMIT 1
-                ) as last_ip
-            FROM users u
-            LEFT JOIN ip_logs l ON u.id = l.user_id
-            GROUP BY u.id, u.username
-            ORDER BY last_login DESC NULLS LAST
-        ''')
-    
-    @staticmethod
     def delete_old_logs(days=30):
         """Hapus log IP lebih dari X hari."""
         from datetime import timedelta
         cutoff = now_local() - timedelta(days=days)
         cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
         return execute_db('DELETE FROM ip_logs WHERE created_at < ?', [cutoff_str])
-    
-    @staticmethod
-    def delete_user_logs(user_id):
-        """Hapus semua log untuk user tertentu."""
-        return execute_db('DELETE FROM ip_logs WHERE user_id = ?', [user_id])

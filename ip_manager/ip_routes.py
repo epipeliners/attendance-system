@@ -2,11 +2,11 @@
 Routes untuk mengelola IP address.
 """
 from flask import Blueprint, render_template, request, session, flash, redirect, url_for
-from ip_manager.ip_model import IPModel
-from ip_manager.ip_utils import get_client_ip, get_user_agent, log_user_ip
-from utils.database import query_db
-from utils.helpers import now_local
 from functools import wraps
+import re
+
+# Import dari ip_model yang sudah dimodifikasi
+from ip_manager.ip_model import IPModel, query_db, execute_db
 
 # Buat blueprint
 ip_bp = Blueprint('ip', __name__, url_prefix='/ip')
@@ -17,7 +17,7 @@ def login_required(f):
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session:
             flash('Please log in first.', 'warning')
-            return redirect(url_for('auth.login'))
+            return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -26,7 +26,7 @@ def admin_required(f):
     def decorated_function(*args, **kwargs):
         if session.get('role') != 'admin':
             flash('Admin access required.', 'danger')
-            return redirect(url_for('main.dashboard'))
+            return redirect(url_for('dashboard'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -46,7 +46,26 @@ def my_ips():
 def all_ips():
     """Admin lihat semua IP dengan statistik."""
     ips = IPModel.get_all_ips(limit=5000)
-    stats = IPModel.get_stats_by_user()
+    
+    # Statistik per user
+    stats = query_db('''
+        SELECT 
+            u.id as user_id,
+            u.username,
+            COUNT(DISTINCT l.ip_address) as unique_ips,
+            COUNT(l.id) as total_logins,
+            MAX(l.created_at) as last_login,
+            (
+                SELECT ip_address FROM ip_logs l2 
+                WHERE l2.user_id = u.id 
+                ORDER BY created_at DESC LIMIT 1
+            ) as last_ip
+        FROM users u
+        LEFT JOIN ip_logs l ON u.id = l.user_id
+        GROUP BY u.id, u.username
+        ORDER BY last_login DESC NULLS LAST
+    ''')
+    
     return render_template('all_ips.html', ips=ips, stats=stats)
 
 @ip_bp.route('/admin/user-ips/<int:user_id>')
@@ -76,6 +95,6 @@ def clean_old_logs():
 @admin_required
 def delete_user_logs(user_id):
     """Hapus semua log untuk user tertentu."""
-    IPModel.delete_user_logs(user_id)
+    execute_db('DELETE FROM ip_logs WHERE user_id = ?', [user_id])
     flash(f'All IP logs for user deleted.', 'success')
     return redirect(url_for('ip.user_ips', user_id=user_id))

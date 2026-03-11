@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Access Denied</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .blocked-card {
+            max-width: 500px;
+            text-align: center;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .lock-icon {
+            font-size: 80px;
+            color: #dc3545;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="blocked-card bg-white">
+        <div class="lock-icon">🔒</div>
+        <h1 class="h3 mb-3">Access Denied</h1>
+        <p class="text-muted mb-4">
+            Your IP address <code>{{ ip }}</code> is not authorized to access this application.
+        </p>
+        <p class="text-muted small">
+            If you believe this is an error, please contact the administrator.
+        </p>
+        <a href="{{ url_for('login') }}" class="btn btn-primary">Try Again</a>
+    </div>
+</body>
+</html>

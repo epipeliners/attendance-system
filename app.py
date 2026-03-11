@@ -163,6 +163,11 @@ def get_count_from_result(result):
 # ---------- Database initialization ----------
 def init_db():
     """Create tables if they don't exist."""
+    with app.app_context():
+        from ip_manager import IPModel
+        IPModel.create_table()
+        print("✅ Tabel IP logs siap")
+
     try:
         conn = get_db()
         if DATABASE_URL and DATABASE_URL.startswith('postgres'):
@@ -182,6 +187,29 @@ def init_db():
             ''')
             cur.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_user_id ON ip_logs(user_id)')
             cur.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_created_at ON ip_logs(created_at)')
+
+            # 🔥 TAMBAHKAN TABEL IP WHITELIST
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS ip_whitelist (
+                    id SERIAL PRIMARY KEY,
+                    ip_address TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    created_by INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    FOREIGN KEY(created_by) REFERENCES users(id)
+                )
+            ''')
+
+           # 🔥 TAMBAHKAN TABEL SETTINGS
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    id SERIAL PRIMARY KEY,
+                    setting_key TEXT UNIQUE NOT NULL,
+                    setting_value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
 
             # Users table with default_shift
             cur.execute('''
@@ -270,6 +298,17 @@ def init_db():
                 ]
                 for name, val in default_rules:
                     cur.execute("INSERT INTO rules (rule_name, value) VALUES (%s, %s)", (name, val))
+
+            cur.execute("SELECT COUNT(*) FROM app_settings WHERE setting_key = 'ip_whitelist_enabled'")
+            if cur.fetchone()['count'] == 0:
+                    cur.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s)", 
+                            ('ip_whitelist_enabled', 'false'))
+                
+            cur.execute("SELECT COUNT(*) FROM app_settings WHERE setting_key = 'whitelist_exclude_admins'")
+            if cur.fetchone()['count'] == 0:
+                    cur.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s)", 
+                            ('whitelist_exclude_admins', 'true'))
+                                       
             conn.commit()
             cur.close()
         else:
@@ -288,6 +327,39 @@ def init_db():
             conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_user_id ON ip_logs(user_id)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_created_at ON ip_logs(created_at)')
 
+            # 🔥 TAMBAHKAN TABEL IP WHITELIST
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS ip_whitelist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ip_address TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    created_by INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT 1,
+                    FOREIGN KEY(created_by) REFERENCES users(id)
+                )
+            ''')
+            # 🔥 TAMBAHKAN TABEL SETTINGS
+            conn.execute('''
+            CREATE TABLE IF NOT EXISTS app_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                setting_key TEXT UNIQUE NOT NULL,
+                setting_value TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+            # Insert default settings jika belum ada
+            cur = conn.execute("SELECT COUNT(*) FROM app_settings WHERE setting_key = 'ip_whitelist_enabled'")
+            if cur.fetchone()[0] == 0:
+                    conn.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?)", 
+                                ('ip_whitelist_enabled', 'false'))
+                
+            cur = conn.execute("SELECT COUNT(*) FROM app_settings WHERE setting_key = 'whitelist_exclude_admins'")
+            if cur.fetchone()[0] == 0:
+                    conn.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?)", 
+                                ('whitelist_exclude_admins', 'true'))
+            
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -567,7 +639,93 @@ def get_monthly_report(tahun, bulan, user_id=None, role=None):
     except Exception as e:
         app.logger.error(f"Error in get_monthly_report: {str(e)}")
         return []
+
+# ---------- IP Whitelist Functions ----------
+def get_client_ip():
+    """Dapatkan IP address client dari request."""
+    if request.headers.get('X-Forwarded-For'):
+        ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    elif request.headers.get('X-Real-IP'):
+        ip = request.headers.get('X-Real-IP')
+    else:
+        ip = request.remote_addr
+    return ip
+
+def is_ip_whitelist_enabled():
+    """Cek apakah fitur whitelist sedang aktif."""
+    result = query_db("SELECT setting_value FROM app_settings WHERE setting_key = 'ip_whitelist_enabled'", one=True)
+    return result and result['setting_value'].lower() == 'true'
+
+def is_ip_allowed(ip_address, user_role=None):
+    """
+    Cek apakah IP diizinkan.
+    Jika exclude_admins = True, admin selalu diizinkan.
+    """
+    # Cek apakah whitelist aktif
+    if not is_ip_whitelist_enabled():
+        return True, "Whitelist disabled"
     
+    # Cek apakah admin dikecualikan
+    exclude_admins = query_db("SELECT setting_value FROM app_settings WHERE setting_key = 'whitelist_exclude_admins'", one=True)
+    if exclude_admins and exclude_admins['setting_value'].lower() == 'true' and user_role == 'admin':
+        return True, "Admin excluded"
+    
+    # Cek apakah IP ada di whitelist dan aktif
+    result = query_db('''
+        SELECT * FROM ip_whitelist 
+        WHERE ip_address = ? AND is_active = 1
+    ''', [ip_address], one=True)
+    
+    if result:
+        return True, "IP allowed"
+    else:
+        return False, "IP not in whitelist"
+
+def whitelist_decorator(f):
+    """Decorator untuk mengecek whitelist di setiap route."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Skip untuk halaman login (biar bisa login dulu)
+        if request.endpoint in ['login', 'static']:
+            return f(*args, **kwargs)
+        
+        ip = get_client_ip()
+        user_role = session.get('role')
+        
+        allowed, message = is_ip_allowed(ip, user_role)
+        
+        if not allowed:
+            app.logger.warning(f"Blocked access from IP {ip} to {request.path}")
+            return render_template('ip_blocked.html', ip=ip), 403
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Decorator khusus untuk admin routes (tetap cek whitelist)
+def admin_required_with_whitelist(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Cek login dulu
+        if 'user_id' not in session:
+            flash('Please log in first.', 'warning')
+            return redirect(url_for('login'))
+        
+        # Cek role admin
+        if session.get('role') != 'admin':
+            flash('Admin access required.', 'danger')
+            return redirect(url_for('dashboard'))
+        
+        # Cek whitelist
+        ip = get_client_ip()
+        allowed, message = is_ip_allowed(ip, 'admin')
+        
+        if not allowed:
+            app.logger.warning(f"Blocked admin access from IP {ip}")
+            return render_template('ip_blocked.html', ip=ip), 403
+        
+        return f(*args, **kwargs)
+    return decorated_function
+   
 # ---------- IP Address Logging Functions ----------
 def get_client_ip():
     """Dapatkan IP address client dari request."""
@@ -1319,6 +1477,94 @@ def all_ips():
     ''')
     
     return render_template('all_ips.html', stats=stats, logs=logs)
+
+@app.route('/admin/whitelist')
+@admin_required_with_whitelist
+def whitelist_list():
+    """Lihat daftar IP whitelist."""
+    ips = query_db('''
+        SELECT w.*, u.username as creator_name
+        FROM ip_whitelist w
+        LEFT JOIN users u ON w.created_by = u.id
+        ORDER BY w.created_at DESC
+    ''')
+    
+    # Ambil settings
+    settings = {}
+    rows = query_db("SELECT setting_key, setting_value FROM app_settings")
+    for row in rows:
+        settings[row['setting_key']] = row['setting_value']
+    
+    return render_template('whitelist_list.html', ips=ips, settings=settings)
+
+@app.route('/admin/whitelist/add', methods=['POST'])
+@admin_required_with_whitelist
+def whitelist_add():
+    """Tambah IP ke whitelist."""
+    ip = request.form.get('ip_address', '').strip()
+    description = request.form.get('description', '').strip()
+    
+    if not ip:
+        flash('IP address is required.', 'danger')
+        return redirect(url_for('whitelist_list'))
+    
+    # Validasi format IP sederhana
+    import re
+    ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$|^[a-fA-F0-9:]+$'  # IPv4 atau IPv6 sederhana
+    if not re.match(ip_pattern, ip):
+        flash('Invalid IP address format.', 'danger')
+        return redirect(url_for('whitelist_list'))
+    
+    try:
+        execute_db('''
+            INSERT INTO ip_whitelist (ip_address, description, created_by)
+            VALUES (?, ?, ?)
+        ''', [ip, description, session['user_id']])
+        flash(f'IP {ip} added to whitelist.', 'success')
+        app.logger.info(f"Admin added IP {ip} to whitelist")
+    except Exception as e:
+        flash(f'IP already exists or error: {str(e)}', 'danger')
+    
+    return redirect(url_for('whitelist_list'))
+
+@app.route('/admin/whitelist/toggle/<int:ip_id>')
+@admin_required_with_whitelist
+def whitelist_toggle(ip_id):
+    """Aktif/nonaktifkan IP."""
+    ip = query_db('SELECT ip_address FROM ip_whitelist WHERE id = ?', [ip_id], one=True)
+    execute_db('''
+        UPDATE ip_whitelist 
+        SET is_active = NOT is_active 
+        WHERE id = ?
+    ''', [ip_id])
+    
+    status = "activated" if execute_db else "deactivated"
+    flash(f'IP {ip["ip_address"]} {status}.', 'success')
+    return redirect(url_for('whitelist_list'))
+
+@app.route('/admin/whitelist/delete/<int:ip_id>')
+@admin_required_with_whitelist
+def whitelist_delete(ip_id):
+    """Hapus IP dari whitelist."""
+    ip = query_db('SELECT ip_address FROM ip_whitelist WHERE id = ?', [ip_id], one=True)
+    execute_db('DELETE FROM ip_whitelist WHERE id = ?', [ip_id])
+    flash(f'IP {ip["ip_address"]} removed from whitelist.', 'success')
+    app.logger.info(f"Admin removed IP {ip['ip_address']} from whitelist")
+    return redirect(url_for('whitelist_list'))
+
+@app.route('/admin/whitelist/settings', methods=['POST'])
+@admin_required_with_whitelist
+def whitelist_settings():
+    """Update pengaturan whitelist."""
+    enabled = 'true' if request.form.get('enabled') == 'on' else 'false'
+    exclude_admins = 'true' if request.form.get('exclude_admins') == 'on' else 'false'
+    
+    execute_db("UPDATE app_settings SET setting_value = ? WHERE setting_key = 'ip_whitelist_enabled'", [enabled])
+    execute_db("UPDATE app_settings SET setting_value = ? WHERE setting_key = 'whitelist_exclude_admins'", [exclude_admins])
+    
+    flash('Whitelist settings updated.', 'success')
+    app.logger.info(f"Admin updated whitelist settings: enabled={enabled}, exclude_admins={exclude_admins}")
+    return redirect(url_for('whitelist_list'))
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
