@@ -1794,7 +1794,28 @@ def user_ip_logs(user_id):
     ''', [user_id])
     
     return render_template('user_ip_logs.html', logs=logs, unique_ips=unique_ips, user=user)
+
+@app.route('/emergency-reset')
+def emergency_reset():
+    """Route darurat untuk reset password admin."""
+    try:
+        from werkzeug.security import generate_password_hash
+        new_password = 'admin123'
+        hashed = generate_password_hash(new_password)
         
+        # Hapus admin lama
+        execute_db("DELETE FROM users WHERE username = 'admin'")
+        
+        # Buat admin baru
+        execute_db(
+            "INSERT INTO users (username, password, role, default_shift) VALUES (?, ?, ?, ?)",
+            ['admin', hashed, 'admin', 'auto']
+        )
+        
+        return "✅ Password admin direset ke: admin123. Silakan login."
+    except Exception as e:
+        return f"Error: {str(e)}"
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)  # debug=False for production
