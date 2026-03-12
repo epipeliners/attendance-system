@@ -66,6 +66,8 @@
                                 <a href="{{ url_for('set_user_shift', user_id=user.id, shift='morning') }}" class="btn btn-sm btn-primary">Set Morning</a>
                                 <a href="{{ url_for('set_user_shift', user_id=user.id, shift='night') }}" class="btn btn-sm btn-dark">Set Night</a>
                                 <a href="{{ url_for('set_user_shift', user_id=user.id, shift='auto') }}" class="btn btn-sm btn-secondary">Set Auto</a>
+                                <a href="{{ url_for('set_user_shift', user_id=user.id, shift='gantung_pagi') }}" class="btn btn-sm btn-warning">Gantung Pagi</a>
+                                <a href="{{ url_for('set_user_shift', user_id=user.id, shift='gantung_malam') }}" class="btn btn-sm btn-secondary">Gantung Malam</a>
                             </td>
                         </tr>
                         {% endfor %}

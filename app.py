@@ -608,8 +608,9 @@ def count_monthly_late_level4(user_id, current_date):
 
 def determine_user_shift(user_id, now):
     """
-    Determine shift for a user based on their default_shift setting and current time.
-    Returns (shift, official_start_datetime, warning_note)
+    Determine shift for a user based on their default_shift setting.
+    Returns (shift, official_start_datetime, warning_note, is_auto)
+    Options: 'morning', 'night', 'gantung_pagi', 'gantung_malam', 'auto'
     """
     try:
         user = query_db('SELECT default_shift FROM users WHERE id = ?', [user_id], one=True)
@@ -619,45 +620,63 @@ def determine_user_shift(user_id, now):
         current_hour = local_time.hour
         warning_note = None
         
+        # MORNING SHIFT (10:00 - 22:00)
         if user_shift == 'morning':
             shift = 'morning'
             official = local_time.replace(hour=10, minute=0, second=0, microsecond=0)
             if current_hour < 10 or current_hour >= 22:
-                warning_note = f"Warning: Check-in at {current_hour}:00 outside morning shift hours"
-            return shift, official, warning_note
+                warning_note = f"Warning: Check-in at {current_hour}:00 outside morning shift hours (10:00-22:00)"
+            return shift, official, warning_note, False
         
+        # NIGHT SHIFT (22:00 - 10:00)
         elif user_shift == 'night':
             shift = 'night'
             if current_hour < 10:
+                # After midnight, official start yesterday 22:00
                 yesterday = local_time - timedelta(days=1)
                 official = yesterday.replace(hour=22, minute=0, second=0, microsecond=0)
             else:
                 official = local_time.replace(hour=22, minute=0, second=0, microsecond=0)
             
             if 10 <= current_hour < 22:
-                warning_note = f"Warning: Check-in at {current_hour}:00 outside night shift hours"
-            return shift, official, warning_note
+                warning_note = f"Warning: Check-in at {current_hour}:00 outside night shift hours (22:00-10:00)"
+            return shift, official, warning_note, False
         
-        else:
-            if 10 <= current_hour < 22:
-                shift = 'morning'
-                official = local_time.replace(hour=10, minute=0, second=0, microsecond=0)
-            elif current_hour >= 22 or current_hour < 10:
-                shift = 'night'
-                if current_hour < 10:
-                    yesterday = local_time - timedelta(days=1)
-                    official = yesterday.replace(hour=22, minute=0, second=0, microsecond=0)
-                else:
-                    official = local_time.replace(hour=22, minute=0, second=0, microsecond=0)
-            else:
-                shift = 'morning'
-                official = local_time.replace(hour=10, minute=0, second=0, microsecond=0)
+        # GANTUNG PAGI (12:00 - 00:00)
+        elif user_shift == 'gantung_pagi':
+            shift = 'gantung_pagi'
+            official = local_time.replace(hour=12, minute=0, second=0, microsecond=0)
             
-            return shift, official, None
+            # Cek apakah dalam rentang 12:00 - 00:00
+            if current_hour < 12:  # 0-11 = pagi (di luar jam)
+                warning_note = f"Warning: Check-in at {current_hour}:00 outside gantung pagi hours (12:00-00:00)"
+            return shift, official, warning_note, False
+        
+        # GANTUNG MALAM (00:00 - 12:00)
+        elif user_shift == 'gantung_malam':
+            shift = 'gantung_malam'
+            
+            if current_hour < 12:
+                # Masih dalam rentang yang sama (00:00-12:00)
+                official = local_time.replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                # Sudah lewat jam 12, berarti official start hari ini jam 00:00 sudah lewat
+                # Tapi kita tetap catat warning
+                official = local_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                warning_note = f"Warning: Check-in at {current_hour}:00 outside gantung malam hours (00:00-12:00)"
+            
+            return shift, official, warning_note, False
+        
+        # AUTO SHIFT - BEBAS TOTAL
+        else:
+            shift = 'auto'
+            official = local_time
+            return shift, official, None, True
+        
     except Exception as e:
         app.logger.error(f"Error in determine_user_shift: {str(e)}")
-        return 'morning', now.replace(hour=10, minute=0, second=0, microsecond=0), None
-
+        return 'auto', now, None, True
+        
 def get_user_debt(user_id):
     """Return owed minutes for user, default 0."""
     try:
@@ -871,49 +890,65 @@ def record_action(action):
                 return redirect(url_for('dashboard'))
 
             # Tentukan shift berdasarkan user preference
-            shift, official_start, warning_note = determine_user_shift(user_id, now)
+            shift, official_start, warning_note, is_auto = determine_user_shift(user_id, now)
             
-            # Catat warning note jika ada
-            final_note = warning_note if warning_note else None
-
-            # Hitung keterlambatan (menit)
-            late_minutes = max(0, (now - official_start).total_seconds() / 60.0)
-            
-            # Tentukan penalti berdasarkan keterlambatan
-            if late_minutes <= 1:
-                level, penalty_note = 0, 'On time'
+            if is_auto:
+                # AUTO MODE - BEBAS TOTAL
+                level = 0
+                penalty_note = 'Auto shift - no rules'
                 extra_hours = 0
-            elif late_minutes <= 10:
-                level, penalty_note = 1, 'Extend 1 Jam'
-                extra_hours = 1
-            elif late_minutes <= 30:
-                level, penalty_note = 2, 'Extend 2 Jam'
-                extra_hours = 2
-            elif late_minutes <= 59:
-                level, penalty_note = 3, 'Extend 2 Jam 3 Hari'
-                extra_hours = 2
-            else:  # >= 60 menit
-                # Cek riwayat keterlambatan level 4 bulan ini
-                count_l4 = count_monthly_late_level4(user_id, now)
-                if count_l4 == 0:
-                    level, penalty_note = 4, 'Extend 2 Jam 3 Hari dan hangus OFFDAY 1x dalam 1 bulan.'
-                elif count_l4 == 1:
-                    level, penalty_note = 4, 'Hangus Bonus Semester.'
-                else:
-                    level, penalty_note = 4, 'Selamat anda Dipecat, Silakan membayar denda 50Juta untuk mengambil data anda dikantor.'
-                extra_hours = 2
-
-            # Gabungkan note
-            if final_note:
-                combined_note = f"{penalty_note} | {final_note}"
+                late_minutes = 0
+                combined_note = 'Free mode (auto shift)'
+                
+                # Expected checkout = check-in + 12 jam
+                work_hours = 12
+                expected_checkout = now + timedelta(hours=work_hours)
+                expected_str = expected_checkout.strftime('%Y-%m-%d %H:%M:%S')
+                
             else:
-                combined_note = penalty_note
+                # MODE BIASA (morning/night) - dengan aturan
+                # Catat warning note jika ada
+                final_note = warning_note if warning_note else None
 
-            # Expected checkout = check-in time + 12 jam + extra hours
-            work_hours = 12 + extra_hours
-            expected_checkout = now + timedelta(hours=work_hours)
-            expected_str = expected_checkout.strftime('%Y-%m-%d %H:%M:%S')
+                # Hitung keterlambatan (menit)
+                late_minutes = max(0, (now - official_start).total_seconds() / 60.0)
+                
+                # Tentukan penalti berdasarkan keterlambatan
+                if late_minutes <= 1:
+                    level, penalty_note = 0, 'On time'
+                    extra_hours = 0
+                elif late_minutes <= 10:
+                    level, penalty_note = 1, 'Extend 1 Jam'
+                    extra_hours = 1
+                elif late_minutes <= 30:
+                    level, penalty_note = 2, 'Extend 2 Jam'
+                    extra_hours = 2
+                elif late_minutes <= 59:
+                    level, penalty_note = 3, 'Extend 2 Jam 3 Hari'
+                    extra_hours = 2
+                else:  # >= 60 menit
+                    # Cek riwayat keterlambatan level 4 bulan ini
+                    count_l4 = count_monthly_late_level4(user_id, now)
+                    if count_l4 == 0:
+                        level, penalty_note = 4, 'Extend 2 Jam 3 Hari dan hangus OFFDAY 1x dalam 1 bulan.'
+                    elif count_l4 == 1:
+                        level, penalty_note = 4, 'Hangus Bonus Semester.'
+                    else:
+                        level, penalty_note = 4, 'Selamat anda Dipecat, Silakan membayar denda 50Juta untuk mengambil data anda dikantor.'
+                    extra_hours = 2
 
+                # Gabungkan note
+                if final_note:
+                    combined_note = f"{penalty_note} | {final_note}"
+                else:
+                    combined_note = penalty_note
+
+                # Expected checkout = check-in time + 12 jam + extra hours
+                work_hours = 12 + extra_hours
+                expected_checkout = now + timedelta(hours=work_hours)
+                expected_str = expected_checkout.strftime('%Y-%m-%d %H:%M:%S')
+
+            # Simpan ke database (sama untuk auto maupun biasa)
             execute_db('''INSERT INTO attendance 
                           (user_id, action, timestamp, note, shift, late_minutes, penalty_level, expected_checkout)
                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
@@ -1183,17 +1218,12 @@ def user_shifts():
 @login_required
 @admin_required
 def set_user_shift(user_id, shift):
-    try:
-        if shift not in ['morning', 'night', 'auto']:
-            flash('Invalid shift value.', 'danger')
-            return redirect(url_for('user_shifts'))
-        
-        execute_db('UPDATE users SET default_shift = ? WHERE id = ?', [shift, user_id])
-        flash(f'User shift updated to {shift}.', 'success')
-        app.logger.info(f"User {user_id} shift set to {shift}")
-    except Exception as e:
-        app.logger.error(f"Error setting user shift: {str(e)}")
-        flash('An error occurred.', 'danger')
+    if shift not in ['morning', 'night', 'gantung_pagi', 'gantung_malam', 'auto']:
+        flash('Invalid shift value.', 'danger')
+        return redirect(url_for('user_shifts'))
+    
+    execute_db('UPDATE users SET default_shift = ? WHERE id = ?', [shift, user_id])
+    flash(f'User shift updated to {shift}.', 'success')
     return redirect(url_for('user_shifts'))
 
 @app.route('/rules', methods=['GET', 'POST'])
@@ -1222,47 +1252,157 @@ def rules():
 @app.route('/records')
 @login_required
 def records():
+    """Tampilkan semua records termasuk breaks."""
     try:
         user_id = session['user_id']
         role = session['role']
+        
         if role == 'admin':
-            records = query_db('''SELECT a.id, u.username, a.action, a.timestamp, a.note, a.shift, a.late_minutes, a.penalty_level, a.expected_checkout
-                                  FROM attendance a JOIN users u ON a.user_id = u.id
-                                  ORDER BY a.timestamp DESC''')
+            # Admin melihat semua data (attendance + breaks)
+            
+            # Ambil attendance records
+            attendance = query_db('''
+                SELECT 
+                    a.id,
+                    u.username,
+                    a.action,
+                    a.timestamp,
+                    a.note,
+                    a.shift,
+                    a.late_minutes,
+                    a.penalty_level,
+                    a.expected_checkout,
+                    'attendance' as record_type
+                FROM attendance a
+                JOIN users u ON a.user_id = u.id
+                ORDER BY a.timestamp DESC
+                LIMIT 1000
+            ''')
+            
+            # Ambil break records
+            breaks = query_db('''
+                SELECT 
+                    b.id,
+                    u.username,
+                    b.break_type || ' ' || CASE WHEN b.end_time IS NULL THEN 'Start' ELSE 'Stop' END as action,
+                    b.start_time as timestamp,
+                    b.note,
+                    NULL as shift,
+                    b.duration as late_minutes,
+                    NULL as penalty_level,
+                    NULL as expected_checkout,
+                    'break' as record_type
+                FROM breaks b
+                JOIN users u ON b.user_id = u.id
+                ORDER BY b.start_time DESC
+                LIMIT 1000
+            ''')
+            
+            # Gabungkan attendance dan breaks
+            from itertools import chain
+            records = list(chain(attendance, breaks))
+            
+            # Urutkan berdasarkan timestamp (terbaru dulu)
+            records.sort(key=lambda x: x['timestamp'], reverse=True)
+            
+            # Batasi 500 records terbaru
+            records = records[:500]
+            
         else:
-            records = query_db('''SELECT a.id, u.username, a.action, a.timestamp, a.note, a.shift, a.late_minutes, a.penalty_level, a.expected_checkout
-                                  FROM attendance a JOIN users u ON a.user_id = u.id
-                                  WHERE a.user_id = ?
-                                  ORDER BY a.timestamp DESC''', [user_id])
+            # User biasa melihat data sendiri (attendance + breaks)
+            
+            # Ambil attendance records user
+            attendance = query_db('''
+                SELECT 
+                    a.id,
+                    u.username,
+                    a.action,
+                    a.timestamp,
+                    a.note,
+                    a.shift,
+                    a.late_minutes,
+                    a.penalty_level,
+                    a.expected_checkout,
+                    'attendance' as record_type
+                FROM attendance a
+                JOIN users u ON a.user_id = u.id
+                WHERE a.user_id = ?
+                ORDER BY a.timestamp DESC
+                LIMIT 500
+            ''', [user_id])
+            
+            # Ambil break records user
+            breaks = query_db('''
+                SELECT 
+                    b.id,
+                    u.username,
+                    b.break_type || ' ' || CASE WHEN b.end_time IS NULL THEN 'Start' ELSE 'Stop' END as action,
+                    b.start_time as timestamp,
+                    b.note,
+                    NULL as shift,
+                    b.duration as late_minutes,
+                    NULL as penalty_level,
+                    NULL as expected_checkout,
+                    'break' as record_type
+                FROM breaks b
+                JOIN users u ON b.user_id = u.id
+                WHERE b.user_id = ?
+                ORDER BY b.start_time DESC
+                LIMIT 500
+            ''', [user_id])
+            
+            # Gabungkan attendance dan breaks
+            from itertools import chain
+            records = list(chain(attendance, breaks))
+            
+            # Urutkan berdasarkan timestamp (terbaru dulu)
+            records.sort(key=lambda x: x['timestamp'], reverse=True)
+        
         now = datetime.now()
         return render_template('records.html', records=records, now=now)
+        
     except Exception as e:
         app.logger.error(f"Error in records route: {str(e)}")
-        flash('An error occurred loading records.', 'danger')
+        flash('Error loading records', 'danger')
         return redirect(url_for('dashboard'))
 
 @app.route('/my-ips')
 @login_required
 def my_ips():
     """Lihat riwayat IP sendiri."""
-    user_id = session['user_id']
-    
-    ips = query_db('''
-        SELECT * FROM ip_logs 
-        WHERE user_id = ? 
-        ORDER BY created_at DESC 
-        LIMIT 100
-    ''', [user_id])
-    
-    unique_ips = query_db('''
-        SELECT DISTINCT ip_address, COUNT(*) as count, MAX(created_at) as last_seen
-        FROM ip_logs 
-        WHERE user_id = ? 
-        GROUP BY ip_address
-        ORDER BY last_seen DESC
-    ''', [user_id])
-    
-    return render_template('my_ips.html', ips=ips, unique_ips=unique_ips)
+    try:
+        user_id = session['user_id']
+        
+        # Ambil riwayat IP
+        ips = query_db('''
+            SELECT * FROM ip_logs 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC 
+            LIMIT 100
+        ''', [user_id])
+        
+        # Jika tidak ada data, buat list kosong
+        if not ips:
+            ips = []
+        
+        # Ambil IP unik
+        unique_ips = query_db('''
+            SELECT ip_address, COUNT(*) as count, MAX(created_at) as last_seen
+            FROM ip_logs 
+            WHERE user_id = ? 
+            GROUP BY ip_address
+            ORDER BY last_seen DESC
+        ''', [user_id])
+        
+        if not unique_ips:
+            unique_ips = []
+        
+        return render_template('my_ips.html', ips=ips, unique_ips=unique_ips)
+        
+    except Exception as e:
+        app.logger.error(f"Error in my_ips: {str(e)}")
+        flash('Error loading IP history', 'danger')
+        return redirect(url_for('dashboard'))
 
 @app.route('/export/excel/<int:tahun>/<int:bulan>')
 @login_required
@@ -1285,12 +1425,27 @@ def export_excel(tahun, bulan):
             cell.alignment = Alignment(horizontal='center')
 
         for row in data:
+            
+            # Format late_minutes ke jam dan menit
+            late_minutes = row['late_minutes']
+            if late_minutes and late_minutes > 0:
+                hours = int(late_minutes // 60)
+                mins = int(late_minutes % 60)
+                if hours > 0 and mins > 0:
+                    late_str = f"{hours} jam {mins} menit"
+                elif hours > 0:
+                    late_str = f"{hours} jam"
+                else:
+                    late_str = f"{mins} menit"
+            else:
+                late_str = ""
+
             ws.append([
                 row['username'],
                 row['action'],
                 row['timestamp'],
                 row['shift'] or '',
-                row['late_minutes'] or '',
+                late_str,
                 row['penalty_level'] or '',
                 row['note'] or '',
                 row['expected_checkout'] or ''
@@ -1340,12 +1495,27 @@ def export_pdf(tahun, bulan):
         table_data = [['Username', 'Action', 'Timestamp', 'Shift', 'Late', 'Penalty', 'Note', 'Expected']]
         for row in data:
             note = (row['note'][:30] + '...') if row['note'] and len(row['note']) > 30 else (row['note'] or '')
+            
+            # Format late_minutes ke jam dan menit
+            late_minutes = row['late_minutes']
+            if late_minutes and late_minutes > 0:
+                hours = int(late_minutes // 60)
+                mins = int(late_minutes % 60)
+                if hours > 0 and mins > 0:
+                    late_str = f"{hours} jam {mins} menit"
+                elif hours > 0:
+                    late_str = f"{hours} jam"
+                else:
+                    late_str = f"{mins} menit"
+            else:
+                late_str = ""
+
             table_data.append([
                 row['username'],
                 row['action'],
                 row['timestamp'],
                 row['shift'] or '',
-                str(row['late_minutes'] or ''),
+                late_str,
                 str(row['penalty_level'] or ''),
                 note,
                 row['expected_checkout'] or ''
@@ -1432,26 +1602,25 @@ def clear_logs():
 def admin_ip_logs():
     """Tampilkan semua log IP address."""
     try:
-        # Ambil semua log IP dengan informasi user
+        # Ambil semua log IP
         logs = query_db('''
-        SELECT 
-            l.id,
-            l.user_id,
-            u.username,
-            l.ip_address,
-            l.user_agent,
-            l.action,
-            l.created_at
-        FROM ip_logs l
-        JOIN users u ON l.user_id = u.id
-        ORDER BY l.created_at DESC
-        LIMIT 500
+            SELECT 
+                l.id,
+                l.user_id,
+                u.username,
+                l.ip_address,
+                l.user_agent,
+                l.action,
+                l.created_at
+            FROM ip_logs l
+            JOIN users u ON l.user_id = u.id
+            ORDER BY l.created_at DESC
+            LIMIT 500
         ''')
-
-        # Jika tidak ada logs, logs akan berupa list kosong
+        
         if not logs:
             logs = []
-
+        
         # Statistik per user
         stats = query_db('''
             SELECT 
@@ -1469,9 +1638,10 @@ def admin_ip_logs():
             stats = []
         
         return render_template('admin_ip_logs.html', logs=logs, stats=stats)
+        
     except Exception as e:
         app.logger.error(f"Error in admin_ip_logs: {str(e)}")
-        flash(f'Error loading IP logs: {str(e)}', 'danger')
+        flash('Error loading IP logs', 'danger')
         return redirect(url_for('dashboard'))
 
 @app.route('/admin/all-ips')

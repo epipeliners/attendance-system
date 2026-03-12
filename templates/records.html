@@ -99,8 +99,36 @@
                         {% if session.role == 'admin' %}<td>{{ rec.username }}</td>{% endif %}
                         <td>{{ rec.action }}</td>
                         <td>{{ rec.timestamp }}</td>
-                        <td>{{ rec.shift or '' }}</td>
-                        <td>{{ rec.late_minutes or '' }}</td>
+                        <td>
+                            {% if rec.shift == 'morning' %}
+                                <span class="badge bg-primary">Morning (10:00-22:00)</span>
+                            {% elif rec.shift == 'night' %}
+                                <span class="badge bg-dark">Night (22:00-10:00)</span>
+                            {% elif rec.shift == 'gantung_pagi' %}
+                                <span class="badge bg-warning">Gantung Pagi (12:00-00:00)</span>
+                            {% elif rec.shift == 'gantung_malam' %}
+                                <span class="badge bg-secondary">Gantung Malam (00:00-12:00)</span>
+                            {% elif rec.shift == 'auto' %}
+                                <span class="badge bg-info">Auto (Bebas)</span>
+                            {% else %}
+                                {{ rec.shift or '-' }}
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if rec.late_minutes and rec.late_minutes > 0 %}
+                                {% set hours = (rec.late_minutes / 60)|int %}
+                                {% set mins = (rec.late_minutes % 60)|int %}
+                                {% if hours > 0 and mins > 0 %}
+                                    {{ hours }} jam {{ mins }} menit
+                                {% elif hours > 0 %}
+                                    {{ hours }} jam
+                                {% else %}
+                                    {{ mins }} menit
+                                {% endif %}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
                         <td>{{ rec.penalty_level or '' }}</td>
                         <td>{{ rec.note or '' }}</td>
                         <td>{{ rec.expected_checkout or '' }}</td>

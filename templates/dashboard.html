@@ -175,8 +175,7 @@
                         <a href="{{ url_for('rules') }}" class="btn btn-outline-primary mb-2 w-100">Manage Rules</a>
                         <a href="{{ url_for('records') }}" class="btn btn-outline-primary mb-2 w-100">View All Records</a>
                         <a href="{{ url_for('clear_logs') }}" class="btn btn-outline-danger mb-2 w-100">Clear Logs</a>
-                        <a href="{{ url_for('ip.all_ips') }}" class="btn btn-outline-info mb-2 w-100">
-                            <i class="fas fa-network-wired"></i> IP Logs (Admin)</a>
+                        <a href="{{ url_for('admin_ip_logs') }}" class="btn btn-outline-info w-100">IP Logs (Admin)</a>
                         <a href="{{ url_for('whitelist_list') }}" class="btn btn-outline-warning mb-2 w-100">
                             <i class="fas fa-shield-alt"></i> IP Whitelist</a>
                         <a href="{{ url_for('admin_ip_logs') }}" class="btn btn-outline-info mb-2 w-100">📊 IP Access Logs</a>      
@@ -190,9 +189,8 @@
                         <h5 class="mb-0">Links</h5>
                     </div>
                     <div class="card-body">
-                        <a href="{{ url_for('records') }}" class="btn btn-outline-primary mb-2 w-100">View My Records</a>
-                        <a href="{{ url_for('ip.my_ips') }}" class="btn btn-outline-info mb-2 w-100">
-                            <i class="fas fa-history"></i> My IP History</a>
+                        <a href="{{ url_for('records') }}" class="btn btn-outline-primary w-100 mb-2">View My Records</a>
+                        <a href="{{ url_for('my_ips') }}" class="btn btn-outline-info w-100">My IP History</a>
                     </div>
                 </div>
             </div>
