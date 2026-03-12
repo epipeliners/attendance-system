@@ -1,6 +1,9 @@
+# .gitignore
 __pycache__/
 *.pyc
-attendance.db
-.env
+instance/
+.venv/
 venv/
-env/
+.env
+*.db
+logs/
