@@ -1,22 +1,31 @@
 from app import app
-import webbrowser
-import time
+from utils.database import query_db, execute_db
+from werkzeug.security import generate_password_hash
+import secrets
 
 print("🚑 Emergency Login Helper")
-print("1. Aplikasi akan jalan di port 5001")
-print("2. Buka http://127.0.0.1:5001/emergency")
+print("========================")
 
-@app.route('/emergency')
-def emergency():
-    from flask import session, redirect, url_for
-    user = query_db('SELECT * FROM users WHERE username = ?', ['admin'], one=True)
-    if user:
-        session['user_id'] = user['id']
-        session['username'] = user['username']
-        session['role'] = user['role']
-        return redirect(url_for('dashboard'))
-    return "Admin not found"
-
-if __name__ == '__main__':
-    webbrowser.open('http://127.0.0.1:5001/emergency')
-    app.run(port=5001, debug=True)
+with app.app_context():
+    # Cek admin
+    admin = query_db("SELECT * FROM users WHERE username = 'admin'", one=True)
+    
+    if admin:
+        # Reset password
+        new_pass = 'admin123'
+        hashed = generate_password_hash(new_pass)
+        execute_db("UPDATE users SET password = ? WHERE username = 'admin'", [hashed])
+        print(f"✅ Password admin direset: {new_pass}")
+    else:
+        # Buat admin baru
+        new_pass = 'admin123'
+        hashed = generate_password_hash(new_pass)
+        execute_db(
+            "INSERT INTO users (username, password, role, default_shift) VALUES (?, ?, ?, ?)",
+            ['admin', hashed, 'admin', 'auto']
+        )
+        print(f"✅ Admin baru dibuat dengan password: {new_pass}")
+    
+    print("\n🔐 Silakan login dengan:")
+    print("   Username: admin")
+    print(f"   Password: {new_pass}")

@@ -19,6 +19,8 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
 import pytz
 import re
+
+# Import IP Manager
 from ip_manager.ip_routes import ip_bp
 from ip_manager.ip_model import IPModel
 
@@ -30,10 +32,9 @@ def now_local():
     return datetime.now(TIMEZONE)
 
 app = Flask(__name__)
-# ✅ FIX 1: Generate random secret key
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
-# ✅ FIX 4: Add error logging
+# Setup logging
 if not os.path.exists('logs'):
     os.mkdir('logs')
 file_handler = RotatingFileHandler('logs/attendance.log', maxBytes=10240, backupCount=10)
@@ -44,6 +45,9 @@ file_handler.setLevel(logging.INFO)
 app.logger.addHandler(file_handler)
 app.logger.setLevel(logging.INFO)
 app.logger.info('Attendance application startup')
+
+# Register Blueprint
+app.register_blueprint(ip_bp)
 
 # ---------- Database connection helpers ----------
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -77,13 +81,11 @@ def query_db(query, args=(), one=False):
             cur.execute(query.replace('?', '%s'), args)
             rv = cur.fetchall()
             cur.close()
-            # Convert to list of dicts for PostgreSQL
             return (rv[0] if rv else None) if one else rv
         else:
             cur = conn.execute(query, args)
             rv = cur.fetchall()
             cur.close()
-            # SQLite rows are already dict-like
             return (rv[0] if rv else None) if one else rv
     except Exception as e:
         app.logger.error(f"Database query error: {str(e)}")
@@ -107,7 +109,7 @@ def execute_db(query, args=()):
         app.logger.error(f"Database execute error: {str(e)}")
         raise
 
-# ✅ FIX 3: Input validation functions
+# ---------- Helper Functions ----------
 def validate_username(username):
     """Validate username format."""
     if not username or len(username) < 3 or len(username) > 50:
@@ -144,11 +146,10 @@ def sanitize_input(input_str):
     """Sanitize user input to prevent XSS."""
     if input_str is None:
         return None
-    # Remove any HTML tags
     return re.sub(r'<[^>]*>', '', input_str.strip())
 
 def get_count_from_result(result):
-    """✅ FIX 5: Helper function to get count from different result types."""
+    """Helper function to get count from different result types."""
     if result is None:
         return 0
     if isinstance(result, dict):
@@ -160,58 +161,108 @@ def get_count_from_result(result):
     else:
         return 0
 
+# ---------- IP Address Functions ----------
+def get_client_ip():
+    """Dapatkan IP address client dari request."""
+    if request.headers.get('X-Forwarded-For'):
+        ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    elif request.headers.get('X-Real-IP'):
+        ip = request.headers.get('X-Real-IP')
+    else:
+        ip = request.remote_addr
+    return ip
+
+def log_user_ip(user_id, action='login'):
+    """Catat IP address user ke database."""
+    try:
+        ip_address = get_client_ip()
+        user_agent = request.headers.get('User-Agent')
+        now_str = now_local().strftime('%Y-%m-%d %H:%M:%S')
+        
+        execute_db('''
+            INSERT INTO ip_logs (user_id, ip_address, user_agent, action, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', [user_id, ip_address, user_agent, action, now_str])
+        
+        app.logger.info(f"IP logged for user {user_id}: {ip_address}")
+    except Exception as e:
+        app.logger.error(f"Error logging IP: {str(e)}")
+
+# ---------- IP Whitelist Functions ----------
+def is_ip_whitelist_enabled():
+    """Cek apakah fitur whitelist sedang aktif."""
+    result = query_db("SELECT setting_value FROM app_settings WHERE setting_key = 'ip_whitelist_enabled'", one=True)
+    return result and result['setting_value'].lower() == 'true'
+
+def is_ip_allowed(ip_address, user_role=None):
+    """
+    Cek apakah IP diizinkan.
+    Jika exclude_admins = True, admin selalu diizinkan.
+    """
+    # ADMIN SELALU DIIZINKAN
+    if user_role == 'admin':
+        return True, "Admin always allowed"
+    
+    # Cek apakah whitelist aktif
+    if not is_ip_whitelist_enabled():
+        return True, "Whitelist disabled"
+    
+    # Cek apakah IP ada di whitelist
+    result = query_db('SELECT * FROM ip_whitelist WHERE ip_address = ? AND is_active = 1', [ip_address], one=True)
+    
+    if result:
+        return True, "IP allowed"
+    else:
+        return False, "IP not in whitelist"
+
+def whitelist_decorator(f):
+    """Decorator untuk mengecek whitelist di setiap route."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if request.endpoint in ['login', 'static']:
+            return f(*args, **kwargs)
+        
+        ip = get_client_ip()
+        user_role = session.get('role')
+        allowed, message = is_ip_allowed(ip, user_role)
+        
+        if not allowed:
+            app.logger.warning(f"Blocked access from IP {ip} to {request.path}")
+            return render_template('ip_blocked.html', ip=ip), 403
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required_with_whitelist(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            flash('Please log in first.', 'warning')
+            return redirect(url_for('login'))
+        
+        if session.get('role') != 'admin':
+            flash('Admin access required.', 'danger')
+            return redirect(url_for('dashboard'))
+        
+        ip = get_client_ip()
+        allowed, message = is_ip_allowed(ip, 'admin')
+        
+        if not allowed:
+            app.logger.warning(f"Blocked admin access from IP {ip}")
+            return render_template('ip_blocked.html', ip=ip), 403
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
 # ---------- Database initialization ----------
 def init_db():
     """Create tables if they don't exist."""
-    with app.app_context():
-        from ip_manager import IPModel
-        IPModel.create_table()
-        print("✅ Tabel IP logs siap")
-
     try:
         conn = get_db()
         if DATABASE_URL and DATABASE_URL.startswith('postgres'):
             cur = conn.cursor()
-
-            # 🔥 TABEL IP LOGS
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS ip_logs (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    ip_address TEXT NOT NULL,
-                    user_agent TEXT,
-                    action TEXT DEFAULT 'login',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(user_id) REFERENCES users(id)
-                )
-            ''')
-            cur.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_user_id ON ip_logs(user_id)')
-            cur.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_created_at ON ip_logs(created_at)')
-
-            # 🔥 TAMBAHKAN TABEL IP WHITELIST
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS ip_whitelist (
-                    id SERIAL PRIMARY KEY,
-                    ip_address TEXT NOT NULL UNIQUE,
-                    description TEXT,
-                    created_by INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    FOREIGN KEY(created_by) REFERENCES users(id)
-                )
-            ''')
-
-           # 🔥 TAMBAHKAN TABEL SETTINGS
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS app_settings (
-                    id SERIAL PRIMARY KEY,
-                    setting_key TEXT UNIQUE NOT NULL,
-                    setting_value TEXT NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Users table with default_shift
+            
+            # Users table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -221,6 +272,7 @@ def init_db():
                     default_shift TEXT DEFAULT 'auto'
                 )
             ''')
+            
             # Attendance table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS attendance (
@@ -236,6 +288,7 @@ def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 )
             ''')
+            
             # Breaks table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS breaks (
@@ -250,6 +303,7 @@ def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 )
             ''')
+            
             # Off days table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS off_days (
@@ -258,6 +312,7 @@ def init_db():
                     description TEXT
                 )
             ''')
+            
             # Rules table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS rules (
@@ -266,6 +321,7 @@ def init_db():
                     value TEXT NOT NULL
                 )
             ''')
+            
             # User debt table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS user_debt (
@@ -276,7 +332,45 @@ def init_db():
                 )
             ''')
             
-            # ✅ FIX 1: Generate random admin password if no users exist
+            # IP Logs table
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS ip_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    ip_address TEXT NOT NULL,
+                    user_agent TEXT,
+                    action TEXT DEFAULT 'login',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+            ''')
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_user_id ON ip_logs(user_id)')
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_created_at ON ip_logs(created_at)')
+            
+            # IP Whitelist table
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS ip_whitelist (
+                    id SERIAL PRIMARY KEY,
+                    ip_address TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    created_by INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    FOREIGN KEY(created_by) REFERENCES users(id)
+                )
+            ''')
+            
+            # App Settings table
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    id SERIAL PRIMARY KEY,
+                    setting_key TEXT UNIQUE NOT NULL,
+                    setting_value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Check if admin exists
             cur.execute("SELECT COUNT(*) FROM users")
             if cur.fetchone()['count'] == 0:
                 admin_password = secrets.token_urlsafe(12)
@@ -289,7 +383,7 @@ def init_db():
                 print(f"\n⚠️  ADMIN PASSWORD GENERATED: {admin_password}")
                 print("⚠️  SAVE THIS PASSWORD - IT WILL NOT BE SHOWN AGAIN!\n")
             
-            # Insert default rules if missing
+            # Insert default rules
             cur.execute("SELECT COUNT(*) FROM rules")
             if cur.fetchone()['count'] == 0:
                 default_rules = [
@@ -298,68 +392,23 @@ def init_db():
                 ]
                 for name, val in default_rules:
                     cur.execute("INSERT INTO rules (rule_name, value) VALUES (%s, %s)", (name, val))
-
+            
+            # Insert default settings
             cur.execute("SELECT COUNT(*) FROM app_settings WHERE setting_key = 'ip_whitelist_enabled'")
             if cur.fetchone()['count'] == 0:
-                    cur.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s)", 
-                            ('ip_whitelist_enabled', 'false'))
-                
+                cur.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s)", 
+                           ('ip_whitelist_enabled', 'false'))
+            
             cur.execute("SELECT COUNT(*) FROM app_settings WHERE setting_key = 'whitelist_exclude_admins'")
             if cur.fetchone()['count'] == 0:
-                    cur.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s)", 
-                            ('whitelist_exclude_admins', 'true'))
-                                       
+                cur.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (%s, %s)", 
+                           ('whitelist_exclude_admins', 'true'))
+            
             conn.commit()
             cur.close()
+            
         else:
             # SQLite
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS ip_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    ip_address TEXT NOT NULL,
-                    user_agent TEXT,
-                    action TEXT DEFAULT 'login',
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(user_id) REFERENCES users(id)
-                )
-            ''')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_user_id ON ip_logs(user_id)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_created_at ON ip_logs(created_at)')
-
-            # 🔥 TAMBAHKAN TABEL IP WHITELIST
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS ip_whitelist (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ip_address TEXT NOT NULL UNIQUE,
-                    description TEXT,
-                    created_by INTEGER,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    is_active BOOLEAN DEFAULT 1,
-                    FOREIGN KEY(created_by) REFERENCES users(id)
-                )
-            ''')
-            # 🔥 TAMBAHKAN TABEL SETTINGS
-            conn.execute('''
-            CREATE TABLE IF NOT EXISTS app_settings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                setting_key TEXT UNIQUE NOT NULL,
-                setting_value TEXT NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-            # Insert default settings jika belum ada
-            cur = conn.execute("SELECT COUNT(*) FROM app_settings WHERE setting_key = 'ip_whitelist_enabled'")
-            if cur.fetchone()[0] == 0:
-                    conn.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?)", 
-                                ('ip_whitelist_enabled', 'false'))
-                
-            cur = conn.execute("SELECT COUNT(*) FROM app_settings WHERE setting_key = 'whitelist_exclude_admins'")
-            if cur.fetchone()[0] == 0:
-                    conn.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?)", 
-                                ('whitelist_exclude_admins', 'true'))
-            
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -369,6 +418,7 @@ def init_db():
                     default_shift TEXT DEFAULT 'auto'
                 )
             ''')
+            
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS attendance (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -383,6 +433,7 @@ def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 )
             ''')
+            
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS breaks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -396,6 +447,7 @@ def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 )
             ''')
+            
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS off_days (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -403,6 +455,7 @@ def init_db():
                     description TEXT
                 )
             ''')
+            
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS rules (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -410,6 +463,7 @@ def init_db():
                     value TEXT NOT NULL
                 )
             ''')
+            
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS user_debt (
                     user_id INTEGER PRIMARY KEY,
@@ -419,7 +473,42 @@ def init_db():
                 )
             ''')
             
-            # ✅ FIX 1: Generate random admin password if no users exist
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS ip_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    ip_address TEXT NOT NULL,
+                    user_agent TEXT,
+                    action TEXT DEFAULT 'login',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_user_id ON ip_logs(user_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_ip_logs_created_at ON ip_logs(created_at)')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS ip_whitelist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ip_address TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    created_by INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT 1,
+                    FOREIGN KEY(created_by) REFERENCES users(id)
+                )
+            ''')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    setting_key TEXT UNIQUE NOT NULL,
+                    setting_value TEXT NOT NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Check if admin exists
             cur = conn.execute("SELECT COUNT(*) FROM users")
             if cur.fetchone()[0] == 0:
                 admin_password = secrets.token_urlsafe(12)
@@ -432,7 +521,7 @@ def init_db():
                 print(f"\n⚠️  ADMIN PASSWORD GENERATED: {admin_password}")
                 print("⚠️  SAVE THIS PASSWORD - IT WILL NOT BE SHOWN AGAIN!\n")
             
-            # Insert default rules if missing
+            # Insert default rules
             cur = conn.execute("SELECT COUNT(*) FROM rules")
             if cur.fetchone()[0] == 0:
                 default_rules = [
@@ -441,34 +530,30 @@ def init_db():
                 ]
                 for name, val in default_rules:
                     conn.execute("INSERT INTO rules (rule_name, value) VALUES (?, ?)", (name, val))
+            
+            # Insert default settings
+            cur = conn.execute("SELECT COUNT(*) FROM app_settings WHERE setting_key = 'ip_whitelist_enabled'")
+            if cur.fetchone()[0] == 0:
+                conn.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?)", 
+                           ('ip_whitelist_enabled', 'false'))
+            
+            cur = conn.execute("SELECT COUNT(*) FROM app_settings WHERE setting_key = 'whitelist_exclude_admins'")
+            if cur.fetchone()[0] == 0:
+                conn.execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?)", 
+                           ('whitelist_exclude_admins', 'true'))
+            
             conn.commit()
+            
     except Exception as e:
         app.logger.error(f"Database initialization error: {str(e)}")
         raise
 
 with app.app_context():
     init_db()
+    IPModel.create_table()
+    print("✅ Tabel IP logs siap")
 
-# ---------- Login decorators ----------
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            flash('Please log in first.', 'warning')
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if session.get('role') != 'admin':
-            flash('Admin access required.', 'danger')
-            return redirect(url_for('dashboard'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-# ---------- Helper functions for business logic ----------
+# ---------- Business Logic Functions ----------
 def get_active_break(user_id, break_type):
     """Return the active break (end_time NULL) for this user and type, or None."""
     try:
@@ -499,7 +584,6 @@ def count_breaks_today(user_id, break_type=None):
             result = query_db('''SELECT COUNT(*) as cnt FROM breaks 
                                  WHERE user_id = ? AND DATE(start_time) = ?''',
                               [user_id, today_str], one=True)
-        # ✅ FIX 5: Use helper function to get count
         return get_count_from_result(result)
     except Exception as e:
         app.logger.error(f"Error in count_breaks_today: {str(e)}")
@@ -517,7 +601,6 @@ def count_monthly_late_level4(user_id, current_date):
                                AND timestamp >= ? 
                                AND DATE(timestamp) < DATE(?)''',
                           [user_id, first_day_str, today_str], one=True)
-        # ✅ FIX 5: Use helper function to get count
         return get_count_from_result(result)
     except Exception as e:
         app.logger.error(f"Error in count_monthly_late_level4: {str(e)}")
@@ -529,20 +612,16 @@ def determine_user_shift(user_id, now):
     Returns (shift, official_start_datetime, warning_note)
     """
     try:
-        # Ambil default shift user dari database
         user = query_db('SELECT default_shift FROM users WHERE id = ?', [user_id], one=True)
-        # Jika user tidak ada atau default_shift NULL, gunakan 'auto'
         user_shift = user['default_shift'] if user and user['default_shift'] else 'auto'
         
         local_time = now.astimezone(TIMEZONE)
         current_hour = local_time.hour
         warning_note = None
         
-        # ✅ FIX 2: Fixed timezone handling
         if user_shift == 'morning':
             shift = 'morning'
             official = local_time.replace(hour=10, minute=0, second=0, microsecond=0)
-            # Jika check-in di luar jam morning shift, beri warning
             if current_hour < 10 or current_hour >= 22:
                 warning_note = f"Warning: Check-in at {current_hour}:00 outside morning shift hours"
             return shift, official, warning_note
@@ -550,7 +629,6 @@ def determine_user_shift(user_id, now):
         elif user_shift == 'night':
             shift = 'night'
             if current_hour < 10:
-                # Setelah midnight, official start yesterday 22:00
                 yesterday = local_time - timedelta(days=1)
                 official = yesterday.replace(hour=22, minute=0, second=0, microsecond=0)
             else:
@@ -560,7 +638,6 @@ def determine_user_shift(user_id, now):
                 warning_note = f"Warning: Check-in at {current_hour}:00 outside night shift hours"
             return shift, official, warning_note
         
-        # Auto shift (berdasarkan waktu)
         else:
             if 10 <= current_hour < 22:
                 shift = 'morning'
@@ -579,7 +656,6 @@ def determine_user_shift(user_id, now):
             return shift, official, None
     except Exception as e:
         app.logger.error(f"Error in determine_user_shift: {str(e)}")
-        # Default fallback
         return 'morning', now.replace(hour=10, minute=0, second=0, microsecond=0), None
 
 def get_user_debt(user_id):
@@ -640,118 +716,24 @@ def get_monthly_report(tahun, bulan, user_id=None, role=None):
         app.logger.error(f"Error in get_monthly_report: {str(e)}")
         return []
 
-# ---------- IP Whitelist Functions ----------
-def get_client_ip():
-    """Dapatkan IP address client dari request."""
-    if request.headers.get('X-Forwarded-For'):
-        ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
-    elif request.headers.get('X-Real-IP'):
-        ip = request.headers.get('X-Real-IP')
-    else:
-        ip = request.remote_addr
-    return ip
-
-def is_ip_whitelist_enabled():
-    """Cek apakah fitur whitelist sedang aktif."""
-    result = query_db("SELECT setting_value FROM app_settings WHERE setting_key = 'ip_whitelist_enabled'", one=True)
-    return result and result['setting_value'].lower() == 'true'
-
-def is_ip_allowed(ip_address, user_role=None):
-    """
-    Cek apakah IP diizinkan.
-    Jika exclude_admins = True, admin selalu diizinkan.
-    """
-    # Cek apakah whitelist aktif
-    if not is_ip_whitelist_enabled():
-        return True, "Whitelist disabled"
-    
-    # Cek apakah admin dikecualikan
-    exclude_admins = query_db("SELECT setting_value FROM app_settings WHERE setting_key = 'whitelist_exclude_admins'", one=True)
-    if exclude_admins and exclude_admins['setting_value'].lower() == 'true' and user_role == 'admin':
-        return True, "Admin excluded"
-    
-    # Cek apakah IP ada di whitelist dan aktif
-    result = query_db('''
-        SELECT * FROM ip_whitelist 
-        WHERE ip_address = ? AND is_active = 1
-    ''', [ip_address], one=True)
-    
-    if result:
-        return True, "IP allowed"
-    else:
-        return False, "IP not in whitelist"
-
-def whitelist_decorator(f):
-    """Decorator untuk mengecek whitelist di setiap route."""
+# ---------- Decorators ----------
+def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # Skip untuk halaman login (biar bisa login dulu)
-        if request.endpoint in ['login', 'static']:
-            return f(*args, **kwargs)
-        
-        ip = get_client_ip()
-        user_role = session.get('role')
-        
-        allowed, message = is_ip_allowed(ip, user_role)
-        
-        if not allowed:
-            app.logger.warning(f"Blocked access from IP {ip} to {request.path}")
-            return render_template('ip_blocked.html', ip=ip), 403
-        
-        return f(*args, **kwargs)
-    return decorated_function
-
-# Decorator khusus untuk admin routes (tetap cek whitelist)
-def admin_required_with_whitelist(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # Cek login dulu
         if 'user_id' not in session:
             flash('Please log in first.', 'warning')
             return redirect(url_for('login'))
-        
-        # Cek role admin
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
         if session.get('role') != 'admin':
             flash('Admin access required.', 'danger')
             return redirect(url_for('dashboard'))
-        
-        # Cek whitelist
-        ip = get_client_ip()
-        allowed, message = is_ip_allowed(ip, 'admin')
-        
-        if not allowed:
-            app.logger.warning(f"Blocked admin access from IP {ip}")
-            return render_template('ip_blocked.html', ip=ip), 403
-        
         return f(*args, **kwargs)
     return decorated_function
-   
-# ---------- IP Address Logging Functions ----------
-def get_client_ip():
-    """Dapatkan IP address client dari request."""
-    if request.headers.get('X-Forwarded-For'):
-        ip = request.headers.get('X-Forwarded-For').split(',')[0].strip()
-    elif request.headers.get('X-Real-IP'):
-        ip = request.headers.get('X-Real-IP')
-    else:
-        ip = request.remote_addr
-    return ip
-
-def log_user_ip(user_id, action='login'):
-    """Catat IP address user ke database."""
-    try:
-        ip_address = get_client_ip()
-        user_agent = request.headers.get('User-Agent')
-        now_str = now_local().strftime('%Y-%m-%d %H:%M:%S')
-        
-        execute_db('''
-            INSERT INTO ip_logs (user_id, ip_address, user_agent, action, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        ''', [user_id, ip_address, user_agent, action, now_str])
-        
-        app.logger.info(f"IP logged for user {user_id}: {ip_address}")
-    except Exception as e:
-        app.logger.error(f"Error logging IP: {str(e)}")
 
 # ---------- Routes ----------
 @app.route('/')
@@ -766,39 +748,43 @@ def index():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    try:
-        if request.method == 'POST':
-            username = sanitize_input(request.form.get('username', ''))
-            password = request.form.get('password', '')
+    if request.method == 'POST':
+        username = sanitize_input(request.form.get('username', ''))
+        password = request.form.get('password', '')
+        
+        if not username or not password:
+            flash('Username and password are required.', 'danger')
+            return render_template('login.html')
+        
+        user = query_db('SELECT * FROM users WHERE username = ?', [username], one=True)
+        if user and check_password_hash(user['password'], password):
+            session['user_id'] = user['id']
+            session['username'] = user['username']
+            session['role'] = user['role']
             
-            # ✅ FIX 3: Input validation
-            if not username or not password:
-                flash('Username and password are required.', 'danger')
-                return render_template('login.html')
+            # Catat IP address
+            log_user_ip(user['id'], 'login')
             
-            user = query_db('SELECT * FROM users WHERE username = ?', [username], one=True)
-            if user and check_password_hash(user['password'], password):
-                session['user_id'] = user['id']
-                session['username'] = user['username']
-                session['role'] = user['role']
-
-                # 🔥 CATAT IP ADDRESS
-                ip_address = request.remote_addr
-                user_agent = request.headers.get('User-Agent')
-                from ip_manager.ip_model import IPModel
-                IPModel.log_ip(user['id'], ip_address, user_agent, 'login')
-
-                flash('Login successful.', 'success')
-                app.logger.info(f"User {username} logged in successfully")
-                return redirect(url_for('dashboard'))
-            else:
-                flash('Invalid username or password.', 'danger')
-                app.logger.warning(f"Failed login attempt for username: {username}")
-        return render_template('login.html')
-    except Exception as e:
-        app.logger.error(f"Error in login route: {str(e)}")
-        flash('An error occurred. Please try again.', 'danger')
-        return render_template('login.html')
+            # Auto-add admin IP to whitelist
+            if user['role'] == 'admin':
+                ip = get_client_ip()
+                try:
+                    execute_db(
+                        "INSERT OR IGNORE INTO ip_whitelist (ip_address, description, is_active) VALUES (?, ?, ?)",
+                        [ip, 'Auto-added admin IP', 1]
+                    )
+                    app.logger.info(f"Admin IP {ip} auto-added to whitelist")
+                except:
+                    pass
+            
+            flash('Login successful.', 'success')
+            app.logger.info(f"User {username} logged in successfully")
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Invalid username or password.', 'danger')
+            app.logger.warning(f"Failed login attempt for username: {username}")
+    
+    return render_template('login.html')
 
 @app.route('/logout')
 def logout():
@@ -830,7 +816,6 @@ def dashboard():
         
         rules = query_db('SELECT rule_name, value FROM rules')
         
-        # Ambil max_smoking_minutes dari rules
         max_smoking = 10
         for r in rules:
             if r['rule_name'] == 'max_smoking_minutes':
@@ -1262,7 +1247,6 @@ def my_ips():
     """Lihat riwayat IP sendiri."""
     user_id = session['user_id']
     
-    # Ambil riwayat IP
     ips = query_db('''
         SELECT * FROM ip_logs 
         WHERE user_id = ? 
@@ -1270,7 +1254,6 @@ def my_ips():
         LIMIT 100
     ''', [user_id])
     
-    # Ambil IP unik
     unique_ips = query_db('''
         SELECT DISTINCT ip_address, COUNT(*) as count, MAX(created_at) as last_seen
         FROM ip_logs 
@@ -1442,7 +1425,55 @@ def clear_logs():
         app.logger.error(f"Error in clear_logs route: {str(e)}")
         flash('An error occurred.', 'danger')
         return redirect(url_for('dashboard'))
-    
+
+@app.route('/admin/ip-logs')
+@login_required
+@admin_required
+def admin_ip_logs():
+    """Tampilkan semua log IP address."""
+    try:
+        # Ambil semua log IP dengan informasi user
+        logs = query_db('''
+        SELECT 
+            l.id,
+            l.user_id,
+            u.username,
+            l.ip_address,
+            l.user_agent,
+            l.action,
+            l.created_at
+        FROM ip_logs l
+        JOIN users u ON l.user_id = u.id
+        ORDER BY l.created_at DESC
+        LIMIT 500
+        ''')
+
+        # Jika tidak ada logs, logs akan berupa list kosong
+        if not logs:
+            logs = []
+
+        # Statistik per user
+        stats = query_db('''
+            SELECT 
+                u.username,
+                COUNT(l.id) as total_logins,
+                COUNT(DISTINCT l.ip_address) as unique_ips,
+                MAX(l.created_at) as last_login
+            FROM users u
+            LEFT JOIN ip_logs l ON u.id = l.user_id
+            GROUP BY u.id, u.username
+            ORDER BY last_login DESC
+        ''')
+        
+        if not stats:
+            stats = []
+        
+        return render_template('admin_ip_logs.html', logs=logs, stats=stats)
+    except Exception as e:
+        app.logger.error(f"Error in admin_ip_logs: {str(e)}")
+        flash(f'Error loading IP logs: {str(e)}', 'danger')
+        return redirect(url_for('dashboard'))
+
 @app.route('/admin/all-ips')
 @login_required
 @admin_required
@@ -1566,6 +1597,34 @@ def whitelist_settings():
     app.logger.info(f"Admin updated whitelist settings: enabled={enabled}, exclude_admins={exclude_admins}")
     return redirect(url_for('whitelist_list'))
 
+@app.route('/admin/ip-logs/<int:user_id>')
+@login_required
+@admin_required
+def user_ip_logs(user_id):
+    """Tampilkan IP logs untuk user tertentu."""
+    
+    user = query_db('SELECT username FROM users WHERE id = ?', [user_id], one=True)
+    if not user:
+        flash('User not found', 'danger')
+        return redirect(url_for('admin_ip_logs'))
+    
+    logs = query_db('''
+        SELECT * FROM ip_logs 
+        WHERE user_id = ? 
+        ORDER BY created_at DESC
+    ''', [user_id])
+    
+    # IP unik
+    unique_ips = query_db('''
+        SELECT DISTINCT ip_address, COUNT(*) as count, MAX(created_at) as last_seen
+        FROM ip_logs 
+        WHERE user_id = ?
+        GROUP BY ip_address
+        ORDER BY last_seen DESC
+    ''', [user_id])
+    
+    return render_template('user_ip_logs.html', logs=logs, unique_ips=unique_ips, user=user)
+        
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)  # debug=False for production
