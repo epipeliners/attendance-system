@@ -250,6 +250,42 @@ def update_email():
         flash('Email already in use', 'danger')
     
     return redirect(url_for('auth.profile'))
+@auth_bp.route('/register', methods=['GET', 'POST'])
+def register():
+    """Register new user (hanya untuk admin atau public)."""
+    if request.method == 'POST':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+        email = request.form.get('email', '')
+        
+        # Validasi sederhana
+        if not username or not password:
+            flash('Username and password required', 'danger')
+            return render_template('register.html')
+        
+        # Cek apakah user sudah ada
+        existing = query_db('SELECT * FROM users WHERE username = ?', [username], one=True)
+        if existing:
+            flash('Username already exists', 'danger')
+            return render_template('register.html')
+        
+        # Buat user baru
+        from werkzeug.security import generate_password_hash
+        hashed = generate_password_hash(password)
+        
+        try:
+            execute_db('''
+                INSERT INTO users (username, password, email, role, default_shift)
+                VALUES (?, ?, ?, ?, ?)
+            ''', [username, hashed, email, 'cs', 'auto'])
+            
+            flash('Registration successful. Please login.', 'success')
+            return redirect(url_for('auth.login'))
+        except Exception as e:
+            flash(f'Error: {str(e)}', 'danger')
+    
+    return render_template('register.html')
+
 
 @auth_bp.route('/logout')
 def logout():
