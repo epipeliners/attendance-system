@@ -3,7 +3,7 @@ import os
 import sys
 
 # Tambahkan path saat ini ke sys.path
-sys.path.append(os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(__file__))
 
 # Import create_app dari folder app
 from app import create_app
