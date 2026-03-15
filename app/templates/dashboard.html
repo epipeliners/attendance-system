@@ -23,7 +23,7 @@
                         <span class="nav-link text-light">Welcome, {{ session.username }} ({{ session.role }})</span>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('logout') }}">Logout</a>
+                        <a class="nav-link" href="{{ url_for('auth.logout') }}">Logout</a>
                     </li>
                 </ul>
             </div>
@@ -83,9 +83,9 @@
                         <h5 class="mb-0">Attendance Actions</h5>
                     </div>
                     <div class="card-body">
-                        <a href="{{ url_for('record_action', action='Check In') }}" class="btn btn-success me-2">Check In</a>
-                        <a href="{{ url_for('record_action', action='Check Out') }}" class="btn btn-warning">Check Out</a>
-                        <a href="{{ url_for('record_action', action='Sick Check Out') }}" class="btn btn-danger">Sick Check Out</a>
+                        <a href="{{ url_for('main.record_action', action='Check In') }}" class="btn btn-success me-2">Check In</a>
+                        <a href="{{ url_for('main.record_action', action='Check Out') }}" class="btn btn-warning">Check Out</a>
+                        <a href="{{ url_for('main.record_action', action='Sick Check Out') }}" class="btn btn-danger">Sick Check Out</a>
                     </div>
                 </div>
             </div>
@@ -118,7 +118,7 @@
                         <div class="mb-3">
                             <strong>Smoking:</strong>
                             {% if not active_smoking %}
-                                <form action="{{ url_for('record_action', action='Smoking Start') }}" method="get" class="d-inline">
+                                <form action="{{ url_for('main.record_action', action='Smoking Start') }}" method="get" class="d-inline">
                                     <button type="submit" class="btn btn-sm btn-outline-secondary">Start</button>
                                     <div class="form-check form-check-inline d-inline-block ms-2">
                                         <input class="form-check-input" type="checkbox" name="phone" value="1" id="phoneSmoking">
@@ -126,7 +126,7 @@
                                     </div>
                                 </form>
                             {% else %}
-                                <a href="{{ url_for('record_action', action='Smoking Stop') }}" class="btn btn-sm btn-outline-danger">Stop</a>
+                                <a href="{{ url_for('main.record_action', action='Smoking Stop') }}" class="btn btn-sm btn-outline-danger">Stop</a>
                                 <span class="badge badge-active ms-2">Active since {{ active_smoking.start_time }}</span>
                             {% endif %}
                         </div>
@@ -134,9 +134,9 @@
                         <div>
                             <strong>Toilet:</strong>
                             {% if not active_toilet %}
-                                <a href="{{ url_for('record_action', action='Toilet Start') }}" class="btn btn-sm btn-outline-secondary">Start</a>
+                                <a href="{{ url_for('main.record_action', action='Toilet Start') }}" class="btn btn-sm btn-outline-secondary">Start</a>
                             {% else %}
-                                <a href="{{ url_for('record_action', action='Toilet Stop') }}" class="btn btn-sm btn-outline-danger">Stop</a>
+                                <a href="{{ url_for('main.record_action', action='Toilet Stop') }}" class="btn btn-sm btn-outline-danger">Stop</a>
                                 <span class="badge badge-active ms-2">Active since {{ active_toilet.start_time }}</span>
                             {% endif %}
                         </div>
@@ -171,28 +171,16 @@
                         <h5 class="mb-0">Admin Links</h5>
                     </div>
                     <div class="card-body">
-                        <a href="{{ url_for('users') }}" class="btn btn-outline-primary mb-2 w-100">Manage Users</a>
-                        <a href="{{ url_for('user_shifts') }}" class="btn btn-outline-info mb-2 w-100">Manage User Shifts</a>
-                        <a href="{{ url_for('off_day') }}" class="btn btn-outline-primary mb-2 w-100">Manage Off Days</a>
-                        <a href="{{ url_for('rules') }}" class="btn btn-outline-primary mb-2 w-100">Manage Rules</a>
-                        <a href="{{ url_for('records') }}" class="btn btn-outline-primary mb-2 w-100">View All Records</a>
-                        <a href="{{ url_for('clear_logs') }}" class="btn btn-outline-danger mb-2 w-100">Clear Logs</a>
-                        <a href="{{ url_for('admin_ip_logs') }}" class="btn btn-outline-info w-100">IP Logs (Admin)</a>
-                        <a href="{{ url_for('whitelist_list') }}" class="btn btn-outline-warning mb-2 w-100">
-                            <i class="fas fa-shield-alt"></i> IP Whitelist</a>
-                        <a href="{{ url_for('admin_ip_logs') }}" class="btn btn-outline-info mb-2 w-100">📊 IP Access Logs</a>      
+                        <a href="{{ url_for('admin.users') }}" class="btn btn-outline-primary mb-2 w-100">Manage Users</a>
+                        <a href="{{ url_for('admin.user_shifts') }}" class="btn btn-outline-info mb-2 w-100">Manage User Shifts</a>
+                        <a href="{{ url_for('admin.off_day') }}" class="btn btn-outline-primary mb-2 w-100">Manage Off Days</a>
+                        <a href="{{ url_for('admin.rules') }}" class="btn btn-outline-primary mb-2 w-100">Manage Rules</a>
+                        <a href="{{ url_for('admin.records') }}" class="btn btn-outline-primary mb-2 w-100">View All Records</a>
+                        <a href="{{ url_for('admin.clear_logs') }}" class="btn btn-outline-danger mb-2 w-100">Clear Logs</a>
                     </div>
                 </div>
             </div>
             {% else %}
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header bg-dark text-white">
-                        <h5 class="mb-0">Links</h5>
-                    </div>
-                    <div class="card-body">
-                        <a href="{{ url_for('records') }}" class="btn btn-outline-primary w-100 mb-2">View My Records</a>
-                        <a href="{{ url_for('my_ips') }}" class="btn btn-outline-info w-100">My IP History</a>
                     </div>
                 </div>
             </div>

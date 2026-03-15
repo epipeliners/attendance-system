@@ -13,8 +13,8 @@
             <a class="navbar-brand" href="#">Attendance System (Admin)</a>
             <div class="collapse navbar-collapse">
                 <ul class="navbar-nav ms-auto">
-                    <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a></li>
-                    <li class="nav-item"><a class="nav-link" href="{{ url_for('logout') }}">Logout</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('main.dashboard') }}">Dashboard</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('auth.logout') }}">Logout</a></li>
                 </ul>
             </div>
         </div>
@@ -63,11 +63,11 @@
                                 {% endif %}
                             </td>
                             <td>
-                                <a href="{{ url_for('set_user_shift', user_id=user.id, shift='morning') }}" class="btn btn-sm btn-primary">Set Morning</a>
-                                <a href="{{ url_for('set_user_shift', user_id=user.id, shift='night') }}" class="btn btn-sm btn-dark">Set Night</a>
-                                <a href="{{ url_for('set_user_shift', user_id=user.id, shift='auto') }}" class="btn btn-sm btn-secondary">Set Auto</a>
-                                <a href="{{ url_for('set_user_shift', user_id=user.id, shift='gantung_pagi') }}" class="btn btn-sm btn-warning">Gantung Pagi</a>
-                                <a href="{{ url_for('set_user_shift', user_id=user.id, shift='gantung_malam') }}" class="btn btn-sm btn-secondary">Gantung Malam</a>
+                                <a href="{{ url_for('admin.set_user_shift', user_id=user.id, shift='morning') }}" class="btn btn-sm btn-primary">Morning</a>
+                                <a href="{{ url_for('admin.set_user_shift', user_id=user.id, shift='night') }}" class="btn btn-sm btn-dark">Night</a>
+                                <a href="{{ url_for('admin.set_user_shift', user_id=user.id, shift='auto') }}" class="btn btn-sm btn-info">Auto</a>
+                                <a href="{{ url_for('admin.set_user_shift', user_id=user.id, shift='gantung_pagi') }}" class="btn btn-sm btn-warning">Gantung Pagi</a>
+                                <a href="{{ url_for('admin.set_user_shift', user_id=user.id, shift='gantung_malam') }}" class="btn btn-sm btn-secondary">Gantung Malam</a>
                             </td>
                         </tr>
                         {% endfor %}
